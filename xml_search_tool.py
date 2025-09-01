@@ -7,8 +7,8 @@ st.title("🔍 XML Allotment Search Tool")
 
 # Upload files (XML or encoded TXT)
 uploaded_files = st.file_uploader(
-    "Upload your XML or Encoded TXT files", 
-    type=["xml", "txt"], 
+    "Upload your XML or Encoded TXT files",
+    type=["xml", "txt"],
     accept_multiple_files=True
 )
 
@@ -20,27 +20,43 @@ total_available = st.sidebar.text_input("TotalAvailable (e.g. 23)", "")
 
 results = []
 
+
 def decode_if_needed(uploaded_file):
     """Handle raw XML or Base64+Gzip encoded text files"""
     raw_bytes = uploaded_file.read()
+
     try:
-        # Try direct XML
+        # Try plain XML
         text = raw_bytes.decode("utf-8", errors="ignore").strip()
         if text.startswith("<?xml"):
             return io.StringIO(text)
 
-        # Otherwise, strip wrappers (### Start...End ###)
+        # Remove wrapper lines (### Start...End ###)
         cleaned = re.sub(r"^#+.*?Start.*?#+\s*", "", text, flags=re.DOTALL)
         cleaned = re.sub(r"#+.*?End.*?#+$", "", cleaned, flags=re.DOTALL).strip()
+
+        # Remove escape characters
+        cleaned = cleaned.replace('\\"', '"').replace("\\n", "").replace("\\", "").strip()
 
         # Base64 decode + decompress
         decoded = base64.b64decode(cleaned)
         decompressed = gzip.decompress(decoded).decode("utf-8", errors="ignore")
+
+        # Keep only valid XML (cut everything before first <?xml)
+        start = decompressed.find("<?xml")
+        if start != -1:
+            decompressed = decompressed[start:]
+
+        # Validate
+        if not decompressed.startswith("<?xml"):
+            raise ValueError("Decoded content is not valid XML")
+
         return io.StringIO(decompressed)
 
     except Exception as e:
         st.error(f"⚠️ Could not decode {uploaded_file.name}: {e}")
         return None
+
 
 def matches(allotment, date_from, room_code, total_available):
     """Flexible matching: only check fields provided by user"""
@@ -50,12 +66,13 @@ def matches(allotment, date_from, room_code, total_available):
 
     if date_from and (not date_elem or date_from not in date_elem.attrib.get("From", "")):
         return False
-    if room_code and (not room_elem or room_elem.attrib.get("Code") == None or room_elem.attrib.get("Code") != room_code):
+    if room_code and (not room_elem or room_elem.attrib.get("Code") != room_code):
         return False
     if total_available and (total != total_available):
         return False
 
     return True
+
 
 if st.button("Search"):
     if not uploaded_files:
