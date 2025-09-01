@@ -22,21 +22,22 @@ results = []
 
 def decode_if_needed(uploaded_file):
     """Handle raw XML or Base64+Gzip encoded text files"""
-    content = uploaded_file.read().decode("utf-8", errors="ignore")
-
-    # Case 1: Already XML
-    if content.strip().startswith("<?xml"):
-        return io.StringIO(content)
-
-    # Case 2: Contains wrapper (### lines)
-    cleaned = re.sub(r"^#+.*?Start.*?#+\s*", "", content, flags=re.DOTALL)
-    cleaned = re.sub(r"#+.*?End.*?#+$", "", cleaned, flags=re.DOTALL).strip()
-
+    raw_bytes = uploaded_file.read()
     try:
+        # Try direct XML
+        text = raw_bytes.decode("utf-8", errors="ignore").strip()
+        if text.startswith("<?xml"):
+            return io.StringIO(text)
+
+        # Otherwise, strip wrappers (### Start...End ###)
+        cleaned = re.sub(r"^#+.*?Start.*?#+\s*", "", text, flags=re.DOTALL)
+        cleaned = re.sub(r"#+.*?End.*?#+$", "", cleaned, flags=re.DOTALL).strip()
+
         # Base64 decode + decompress
         decoded = base64.b64decode(cleaned)
         decompressed = gzip.decompress(decoded).decode("utf-8", errors="ignore")
         return io.StringIO(decompressed)
+
     except Exception as e:
         st.error(f"⚠️ Could not decode {uploaded_file.name}: {e}")
         return None
@@ -44,12 +45,12 @@ def decode_if_needed(uploaded_file):
 def matches(allotment, date_from, room_code, total_available):
     """Flexible matching: only check fields provided by user"""
     total = allotment.attrib.get("TotalAvailable")
-    date_elem = allotment.find(".//Date")
-    room_elem = allotment.find(".//RoomType")
+    date_elem = allotment.find(".//{*}Date")  # namespace-safe
+    room_elem = allotment.find(".//{*}RoomType")
 
     if date_from and (not date_elem or date_from not in date_elem.attrib.get("From", "")):
         return False
-    if room_code and (not room_elem or room_elem.attrib.get("Code") != room_code):
+    if room_code and (not room_elem or room_elem.attrib.get("Code") == None or room_elem.attrib.get("Code") != room_code):
         return False
     if total_available and (total != total_available):
         return False
@@ -71,10 +72,10 @@ if st.button("Search"):
                 tree = ET.parse(file_obj)
                 root = tree.getroot()
 
-                for allotment in root.iter("Allotment"):
+                for allotment in root.findall(".//{*}Allotment"):
                     if matches(allotment, date_from, room_code, total_available):
-                        date_elem = allotment.find(".//Date")
-                        room_elem = allotment.find(".//RoomType")
+                        date_elem = allotment.find(".//{*}Date")
+                        room_elem = allotment.find(".//{*}RoomType")
 
                         results.append({
                             "File": uploaded_file.name,
