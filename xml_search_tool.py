@@ -1,11 +1,11 @@
 import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
-import base64, gzip, re, io, json
+import base64, gzip, io, json, re
 from xml.dom import minidom
 import copy
 
-st.title("🔍 XML Allotment & InventoryItem Search Tool")
+st.title("🔍 Flexible XML Search Tool")
 
 uploaded_files = st.file_uploader(
     "Upload your XML or Encoded TXT files",
@@ -14,9 +14,9 @@ uploaded_files = st.file_uploader(
 )
 
 st.sidebar.header("Search Parameters")
-date_from = st.sidebar.text_input("Date From (e.g. 2025-10-07)", "")
-room_code = st.sidebar.text_input("RoomType/Room Code (e.g. 216)", "")
-total_available = st.sidebar.text_input("TotalAvailable (e.g. 23)", "")
+value1 = st.sidebar.text_input("Value 1 (e.g. 2025-09-01)", "")
+value2 = st.sidebar.text_input("Value 2 (optional)", "")
+value3 = st.sidebar.text_input("Value 3 (optional)", "")
 
 payload_choice = st.sidebar.radio(
     "If JSON with XML inside:",
@@ -35,6 +35,11 @@ def safe_b64decode(data: str):
     if missing_padding:
         data += "=" * (4 - missing_padding)
     return base64.b64decode(data)
+
+
+def normalize_xml_text(text: str) -> str:
+    """Clean XML text for searching"""
+    return re.sub(r"\s+", " ", text).strip()
 
 
 # ---------------------- DECODER ----------------------
@@ -112,99 +117,28 @@ def extract_from_json(uploaded_file, payload):
     return extracted
 
 
-# ---------------------- MATCH FUNCTIONS ----------------------
-def matches_allotment(allotment, date_from, room_code, total_available):
-    """Check match for Allotment structure"""
-    total = allotment.attrib.get("TotalAvailable")
-
-    # Date check
-    if date_from:
-        found_match = False
-        for date_elem in allotment.findall(".//{*}Date") + allotment.findall(".//{*}date"):
-            date_attr = date_elem.attrib.get("From") or date_elem.attrib.get("value") or ""
-            if date_attr == date_from:
-                found_match = True
-                break
-        if not found_match:
-            return False
-
-    # Room code check
-    if room_code:
-        room_elem = allotment.find(".//{*}RoomType") or allotment.find(".//{*}room")
-        room_attr = ""
-        if room_elem is not None:
-            room_attr = room_elem.attrib.get("Code") or room_elem.attrib.get("id") or (room_elem.text or "")
-        if room_attr != room_code:
-            return False
-
-    # TotalAvailable check
-    if total_available and total != total_available:
-        return False
-
-    return True
-
-
-def matches_inventory(item, date_from, room_code):
-    """Check match for InventoryItem structure"""
-    # Date check
-    if date_from:
-        df = item.find(".//{*}DateFrom")
-        dt = item.find(".//{*}DateTo")
-        df_val = df.attrib.get("date") if df is not None else ""
-        dt_val = dt.attrib.get("date") if dt is not None else ""
-        if df_val != date_from and dt_val != date_from:
-            return False
-
-    # Room code check
-    if room_code:
-        room_elem = item.find(".//{*}Room")
-        room_val = room_elem.text.strip() if room_elem is not None and room_elem.text else ""
-        if room_val != room_code:
-            return False
-
-    return True
-
-
 # ---------------------- MAIN SEARCH ----------------------
 if st.button("Search"):
+    search_terms = [v for v in [value1, value2, value3] if v.strip()]
     if not uploaded_files:
         st.warning("Please upload at least one file.")
-    elif not (date_from or room_code or total_available):
-        st.warning("Please provide at least one search parameter.")
+    elif not search_terms:
+        st.warning("Please provide at least one search value.")
     else:
         for uploaded_file in uploaded_files:
             file_objs = decode_if_needed(uploaded_file)
             for idx, file_obj in enumerate(file_objs):
                 try:
-                    tree = ET.parse(file_obj)
-                    root = tree.getroot()
+                    xml_text = normalize_xml_text(file_obj.read())
+                    file_obj.seek(0)  # reset for parsing
 
-                    # --- Case 1: Allotments ---
-                    for allotment in root.findall(".//{*}Allotment"):
-                        if matches_allotment(allotment, date_from, room_code, total_available):
-                            results.append({
-                                "File": f"{uploaded_file.name} (part {idx+1})",
-                                "Type": "Allotment",
-                                "Date": date_from,
-                                "Room": room_code,
-                                "TotalAvailable": allotment.attrib.get("TotalAvailable", "")
-                            })
-                            xml_matches.append(copy.deepcopy(allotment))
-
-                    # --- Case 2: InventoryItems ---
-                    for item in root.findall(".//{*}InventoryItem"):
-                        if matches_inventory(item, date_from, room_code):
-                            df = item.find(".//{*}DateFrom")
-                            dt = item.find(".//{*}DateTo")
-                            room_elem = item.find(".//{*}Room")
-                            results.append({
-                                "File": f"{uploaded_file.name} (part {idx+1})",
-                                "Type": "InventoryItem",
-                                "DateFrom": df.attrib.get("date") if df is not None else "",
-                                "DateTo": dt.attrib.get("date") if dt is not None else "",
-                                "Room": room_elem.text if room_elem is not None else ""
-                            })
-                            xml_matches.append(copy.deepcopy(item))
+                    # Check if all search terms are present
+                    if all(term in xml_text for term in search_terms):
+                        results.append({
+                            "File": f"{uploaded_file.name} (part {idx+1})",
+                            "Matches": ", ".join(search_terms)
+                        })
+                        xml_matches.append(xml_text)
 
                 except Exception as e:
                     st.error(f"Error parsing {uploaded_file.name} (part {idx+1}): {e}")
@@ -217,12 +151,8 @@ if st.button("Search"):
 
             # Export XML
             if xml_matches:
-                xml_root = ET.Element("Results")
-                for match in xml_matches:
-                    xml_root.append(match)
-
-                rough_string = ET.tostring(xml_root, encoding="utf-8")
-                reparsed = minidom.parseString(rough_string)
+                joined = "\n\n".join(xml_matches)
+                reparsed = minidom.parseString(joined)
                 pretty_xml = reparsed.toprettyxml(indent="  ")
 
                 st.download_button(
