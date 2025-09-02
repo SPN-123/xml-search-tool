@@ -2,6 +2,7 @@ import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
 import base64, gzip, re, io, json
+from xml.dom import minidom
 
 st.title("🔍 XML Allotment Search Tool")
 
@@ -28,6 +29,7 @@ payload_choice = st.sidebar.radio(
 results = []
 preview_data = {}
 full_xml_data = {}
+xml_matches = []  # store matching XML fragments
 
 
 def decode_if_needed(uploaded_file):
@@ -146,6 +148,7 @@ if st.button("Search"):
                     root = tree.getroot()
                     for allotment in root.findall(".//{*}Allotment") + root.findall(".//{*}room"):
                         if matches(allotment, date_from, room_code, total_available):
+                            # Store match info for table
                             date_elem = allotment.find(".//{*}Date") or allotment.find(".//{*}date")
                             room_elem = allotment.find(".//{*}RoomType") or allotment.find(".//{*}room")
                             results.append({
@@ -155,6 +158,8 @@ if st.button("Search"):
                                 "To": date_elem.attrib.get("To") if date_elem is not None and "To" in date_elem.attrib else "",
                                 "TotalAvailable": allotment.attrib.get("TotalAvailable") if "TotalAvailable" in allotment.attrib else ""
                             })
+                            # Save matching XML fragment
+                            xml_matches.append(allotment)
                 except Exception as e:
                     st.error(f"Error parsing {uploaded_file.name} (part {idx+1}): {e}")
 
@@ -178,13 +183,22 @@ if st.button("Search"):
             st.success("✅ Matching records found!")
             st.dataframe(df)
 
-            # CSV download
-            csv = df.to_csv(index=False).encode("utf-8")
-            st.download_button("Download CSV", csv, "results.csv", "text/csv")
+            # --- XML Export ---
+            if xml_matches:
+                xml_root = ET.Element("Results")
+                for match in xml_matches:
+                    xml_root.append(match)
 
-            # Excel download
-            excel_bytes = io.BytesIO()
-            df.to_excel(excel_bytes, index=False, engine="openpyxl")
-            st.download_button("Download Excel", excel_bytes.getvalue(), "results.xlsx", "application/vnd.ms-excel")
+                rough_string = ET.tostring(xml_root, encoding="utf-8")
+                reparsed = minidom.parseString(rough_string)
+                pretty_xml = reparsed.toprettyxml(indent="  ")
+
+                st.download_button(
+                    "⬇️ Download Matching XML",
+                    pretty_xml.encode("utf-8"),
+                    "results.xml",
+                    "application/xml"
+                )
+
         else:
             st.warning("❌ No matches found.")
