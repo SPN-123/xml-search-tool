@@ -27,6 +27,16 @@ payload_choice = st.sidebar.radio(
 results, preview_data, full_xml_data, xml_matches = [], {}, {}, []
 
 
+# ---------------------- HELPERS ----------------------
+def safe_b64decode(data: str):
+    """Fix Base64 padding and decode safely"""
+    data = data.strip().replace("\n", "").replace("\r", "")
+    missing_padding = len(data) % 4
+    if missing_padding:
+        data += "=" * (4 - missing_padding)
+    return base64.b64decode(data)
+
+
 # ---------------------- DECODER ----------------------
 def decode_if_needed(uploaded_file):
     """Decode plain XML/JSON, or Base64+Gzip containing XML/JSON-with-XML"""
@@ -50,10 +60,7 @@ def decode_if_needed(uploaded_file):
     # --- Case 2: Try Base64+Gzip ---
     try:
         text = raw_bytes.decode("utf-8-sig", errors="ignore").strip()
-        # Fix padding if needed
-        while len(text) % 4 != 0:
-            text += "="
-        decoded = base64.b64decode(text)
+        decoded = safe_b64decode(text)
         decompressed = gzip.decompress(decoded).decode("utf-8-sig", errors="ignore").strip()
 
         if decompressed.startswith("<?xml"):
