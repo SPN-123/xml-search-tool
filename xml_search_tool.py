@@ -57,52 +57,53 @@ def decode_if_needed(uploaded_file):
             preview_data[uploaded_file.name] = [decompressed[:2000]]
             return [io.StringIO(decompressed)]
 
-        # ✅ Case 2: JSON with embedded XML
-        if decompressed.startswith("{"):
+        # ✅ Case 2: Try parsing as JSON (more tolerant)
+        try:
             payload = json.loads(decompressed)
-            extracted_xmls = []
-            previews = []
-            fulls = []
+        except Exception:
+            raise ValueError("Decoded content is neither XML nor JSON-with-XML")
 
-            if payload_choice == "RqPayload":
-                xml_candidate = payload.get("RqPayload")
+        extracted_xmls, previews, fulls = [], [], []
+
+        if payload_choice == "RqPayload":
+            xml_candidate = payload.get("RqPayload")
+            if xml_candidate:
+                xml_candidate = xml_candidate.replace('\\"', '"').replace("\\n", "\n").strip()
+                extracted_xmls.append(io.StringIO(xml_candidate))
+                fulls.append(xml_candidate)
+                previews.append(xml_candidate[:2000])
+
+        elif payload_choice == "RsPayload":
+            xml_candidate = payload.get("RsPayload")
+            if xml_candidate:
+                xml_candidate = xml_candidate.replace('\\"', '"').replace("\\n", "\n").strip()
+                extracted_xmls.append(io.StringIO(xml_candidate))
+                fulls.append(xml_candidate)
+                previews.append(xml_candidate[:2000])
+
+        elif payload_choice == "Both":
+            for key in ["RqPayload", "RsPayload"]:
+                xml_candidate = payload.get(key)
                 if xml_candidate:
                     xml_candidate = xml_candidate.replace('\\"', '"').replace("\\n", "\n").strip()
                     extracted_xmls.append(io.StringIO(xml_candidate))
                     fulls.append(xml_candidate)
                     previews.append(xml_candidate[:2000])
 
-            elif payload_choice == "RsPayload":
-                xml_candidate = payload.get("RsPayload")
-                if xml_candidate:
-                    xml_candidate = xml_candidate.replace('\\"', '"').replace("\\n", "\n").strip()
-                    extracted_xmls.append(io.StringIO(xml_candidate))
-                    fulls.append(xml_candidate)
-                    previews.append(xml_candidate[:2000])
+        else:  # Auto
+            xml_candidate = payload.get("RqPayload") or payload.get("RsPayload")
+            if xml_candidate:
+                xml_candidate = xml_candidate.replace('\\"', '"').replace("\\n", "\n").strip()
+                extracted_xmls.append(io.StringIO(xml_candidate))
+                fulls.append(xml_candidate)
+                previews.append(xml_candidate[:2000])
 
-            elif payload_choice == "Both":
-                for key in ["RqPayload", "RsPayload"]:
-                    xml_candidate = payload.get(key)
-                    if xml_candidate:
-                        xml_candidate = xml_candidate.replace('\\"', '"').replace("\\n", "\n").strip()
-                        extracted_xmls.append(io.StringIO(xml_candidate))
-                        fulls.append(xml_candidate)
-                        previews.append(xml_candidate[:2000])
+        if extracted_xmls:
+            full_xml_data[uploaded_file.name] = fulls
+            preview_data[uploaded_file.name] = previews
+            return extracted_xmls
 
-            else:  # Auto
-                xml_candidate = payload.get("RqPayload") or payload.get("RsPayload")
-                if xml_candidate:
-                    xml_candidate = xml_candidate.replace('\\"', '"').replace("\\n", "\n").strip()
-                    extracted_xmls.append(io.StringIO(xml_candidate))
-                    fulls.append(xml_candidate)
-                    previews.append(xml_candidate[:2000])
-
-            if extracted_xmls:
-                full_xml_data[uploaded_file.name] = fulls
-                preview_data[uploaded_file.name] = previews
-                return extracted_xmls
-
-        raise ValueError("Decoded content is neither XML nor JSON-with-XML")
+        raise ValueError("JSON did not contain valid RqPayload or RsPayload")
 
     except Exception as e:
         st.error(f"⚠️ Could not decode {uploaded_file.name}: {e}")
@@ -154,7 +155,7 @@ if st.button("Search"):
                                 "TotalAvailable": allotment.attrib.get("TotalAvailable")
                             })
                 except Exception as e:
-                    st.error(f"Error parsing {uploaded_file.name}: {e}")
+                    st.error(f"Error parsing {uploaded_file.name} (part {idx+1}): {e}")
 
         # Show previews and downloads
         if preview_data:
