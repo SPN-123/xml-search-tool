@@ -4,70 +4,60 @@ import pandas as pd
 import base64, gzip, re, io, json
 from xml.dom import minidom
 
-st.title("🔍 XML Allotment Search Tool")
+st.title("🔍 XML Allotment & InventoryItem Search Tool")
 
-# Upload files
 uploaded_files = st.file_uploader(
     "Upload your XML or Encoded TXT files",
     type=["xml", "txt"],
     accept_multiple_files=True
 )
 
-# Search parameters
 st.sidebar.header("Search Parameters")
-date_from = st.sidebar.text_input("Date From (e.g. 2026-07-06)", "")
-room_code = st.sidebar.text_input("RoomType Code (e.g. 216)", "")
+date_from = st.sidebar.text_input("Date From (e.g. 2025-10-07)", "")
+room_code = st.sidebar.text_input("RoomType/Room Code (e.g. 216)", "")
 total_available = st.sidebar.text_input("TotalAvailable (e.g. 23)", "")
 
-# Choice for JSON payloads
 payload_choice = st.sidebar.radio(
     "If JSON with XML inside:",
     options=["Auto", "RqPayload", "RsPayload", "Both"],
     index=0
 )
 
-results = []
-preview_data = {}
-full_xml_data = {}
-xml_matches = []  # store matching XML fragments
+results, preview_data, full_xml_data, xml_matches = [], {}, {}, []
 
 
 def decode_if_needed(uploaded_file):
     """Decode XML, JSON-with-XML, or JSON-like-with-single-quotes inside Base64+Gzip files"""
     raw_bytes = uploaded_file.read()
+
+    # Case 1: plain XML
     try:
-        # Plain XML
-        text = raw_bytes.decode("utf-8", errors="ignore").strip()
+        text = raw_bytes.decode("utf-8-sig", errors="ignore").strip()
         if text.startswith("<?xml"):
             full_xml_data[uploaded_file.name] = [text]
             preview_data[uploaded_file.name] = [text[:2000]]
             return [io.StringIO(text)]
+    except Exception:
+        pass
 
-        # Base64 decode + decompress (with BOM-safe decoding)
-        decoded = base64.b64decode(text)
+    # Case 2: Base64 + Gzip
+    try:
+        decoded = base64.b64decode(raw_bytes)
         decompressed = gzip.decompress(decoded).decode("utf-8-sig", errors="ignore").strip()
 
-        # Debug preview
-        st.subheader(f"🔎 Raw decompressed preview from {uploaded_file.name}")
-        st.text_area(f"First 500 chars from {uploaded_file.name}", decompressed[:500], height=150)
-
-        # Case 1: Direct XML
+        # XML directly?
         if decompressed.startswith("<?xml"):
             full_xml_data[uploaded_file.name] = [decompressed]
             preview_data[uploaded_file.name] = [decompressed[:2000]]
             return [io.StringIO(decompressed)]
 
-        # Case 2: Try strict JSON
+        # Try JSON
         try:
             payload = json.loads(decompressed)
         except Exception:
-            # Case 3: Fix JSON-like (single quotes → double quotes)
-            fixed = decompressed
-            fixed = re.sub(r"([{,])\s*'([^']+)'\s*:", r'\1"\2":', fixed)   # keys
-            fixed = re.sub(r":\s*'([^']*)'", r':"\1"', fixed)              # string values
+            fixed = re.sub(r"([{,])\s*'([^']+)'\s*:", r'\1"\2":', decompressed)
+            fixed = re.sub(r":\s*'([^']*)'", r':"\1"', fixed)
             payload = json.loads(fixed)
-
-        st.success(f"✅ {uploaded_file.name}: decoded as JSON/JSON-like")
 
         extracted, previews, fulls = [], [], []
         keys = []
@@ -86,49 +76,63 @@ def decode_if_needed(uploaded_file):
                 extracted.append(io.StringIO(xml_candidate))
                 previews.append(xml_candidate[:2000])
                 fulls.append(xml_candidate)
-                st.text_area(f"Preview of {key} from {uploaded_file.name}", xml_candidate[:500], height=150)
 
         if extracted:
             full_xml_data[uploaded_file.name] = fulls
             preview_data[uploaded_file.name] = previews
             return extracted
 
-        return []
-
     except Exception as e:
         st.error(f"⚠️ Could not decode {uploaded_file.name}: {e}")
-        return []
+
+    return []
 
 
-def matches(allotment, date_from, room_code, total_available):
-    """Flexible matching with strict comparisons (checks all Date elements)"""
+def matches_allotment(allotment, date_from, room_code, total_available):
+    """Check match for Allotment structure"""
     total = allotment.attrib.get("TotalAvailable")
 
-    # Room element
-    room_elem = allotment.find(".//{*}RoomType") or allotment.find(".//{*}room")
-
-    # --- Date check (must match at least one date) ---
+    # Date check
     if date_from:
         found_match = False
         for date_elem in allotment.findall(".//{*}Date") + allotment.findall(".//{*}date"):
             date_attr = date_elem.attrib.get("From") or date_elem.attrib.get("value") or ""
-            if date_attr == date_from:   # exact match
+            if date_attr == date_from:
                 found_match = True
                 break
         if not found_match:
             return False
 
-    # --- Room code check ---
+    # Room code check
     if room_code:
-        room_attr = ""
-        if room_elem is not None:
-            room_attr = room_elem.attrib.get("Code") or room_elem.attrib.get("id") or ""
-        if room_attr != room_code:   # exact match
+        room_elem = allotment.find(".//{*}RoomType") or allotment.find(".//{*}room")
+        room_attr = room_elem.attrib.get("Code") if room_elem is not None else room_elem.attrib.get("id") if room_elem is not None else ""
+        if room_attr != room_code:
             return False
 
-    # --- TotalAvailable check ---
-    if total_available:
-        if total != total_available:   # exact match
+    # TotalAvailable check
+    if total_available and total != total_available:
+        return False
+
+    return True
+
+
+def matches_inventory(item, date_from, room_code):
+    """Check match for InventoryItem structure"""
+    # Date check
+    if date_from:
+        df = item.find(".//{*}DateFrom")
+        dt = item.find(".//{*}DateTo")
+        df_val = df.attrib.get("date") if df is not None else ""
+        dt_val = dt.attrib.get("date") if dt is not None else ""
+        if df_val != date_from and dt_val != date_from:
+            return False
+
+    # Room code check
+    if room_code:
+        room_elem = item.find(".//{*}Room")
+        room_val = room_elem.text.strip() if room_elem is not None else ""
+        if room_val != room_code:
             return False
 
     return True
@@ -146,44 +150,44 @@ if st.button("Search"):
                 try:
                     tree = ET.parse(file_obj)
                     root = tree.getroot()
-                    for allotment in root.findall(".//{*}Allotment") + root.findall(".//{*}room"):
-                        if matches(allotment, date_from, room_code, total_available):
-                            # Store match info for table
-                            date_elem = allotment.find(".//{*}Date") or allotment.find(".//{*}date")
-                            room_elem = allotment.find(".//{*}RoomType") or allotment.find(".//{*}room")
+
+                    # --- Case 1: Allotments ---
+                    for allotment in root.findall(".//{*}Allotment"):
+                        if matches_allotment(allotment, date_from, room_code, total_available):
                             results.append({
                                 "File": f"{uploaded_file.name} (part {idx+1})",
-                                "RoomType": room_elem.attrib.get("Code") if room_elem is not None else room_elem.attrib.get("id") if room_elem is not None else "",
-                                "From": date_elem.attrib.get("From") if date_elem is not None and "From" in date_elem.attrib else date_elem.attrib.get("value") if date_elem is not None else "",
-                                "To": date_elem.attrib.get("To") if date_elem is not None and "To" in date_elem.attrib else "",
-                                "TotalAvailable": allotment.attrib.get("TotalAvailable") if "TotalAvailable" in allotment.attrib else ""
+                                "Type": "Allotment",
+                                "Date": date_from,
+                                "Room": room_code,
+                                "TotalAvailable": allotment.attrib.get("TotalAvailable", "")
                             })
-                            # Save matching XML fragment
                             xml_matches.append(allotment)
+
+                    # --- Case 2: InventoryItems ---
+                    for item in root.findall(".//{*}InventoryItem"):
+                        if matches_inventory(item, date_from, room_code):
+                            df = item.find(".//{*}DateFrom")
+                            dt = item.find(".//{*}DateTo")
+                            room_elem = item.find(".//{*}Room")
+                            results.append({
+                                "File": f"{uploaded_file.name} (part {idx+1})",
+                                "Type": "InventoryItem",
+                                "DateFrom": df.attrib.get("date") if df is not None else "",
+                                "DateTo": dt.attrib.get("date") if dt is not None else "",
+                                "Room": room_elem.text if room_elem is not None else ""
+                            })
+                            xml_matches.append(item)
+
                 except Exception as e:
                     st.error(f"Error parsing {uploaded_file.name} (part {idx+1}): {e}")
 
-        # Show previews + downloads
-        if preview_data:
-            st.subheader("📄 Preview of Decoded XML")
-            for fname, previews in preview_data.items():
-                for i, preview in enumerate(previews):
-                    st.text_area(f"Preview from {fname} (part {i+1})", preview, height=200)
-                    if fname in full_xml_data and i < len(full_xml_data[fname]):
-                        st.download_button(
-                            f"Download full XML from {fname} (part {i+1})",
-                            full_xml_data[fname][i].encode("utf-8"),
-                            file_name=f"{fname}_part{i+1}.xml",
-                            mime="application/xml"
-                        )
-
-        # Show results
+        # Results
         if results:
             df = pd.DataFrame(results)
             st.success("✅ Matching records found!")
             st.dataframe(df)
 
-            # --- XML Export ---
+            # XML Export
             if xml_matches:
                 xml_root = ET.Element("Results")
                 for match in xml_matches:
@@ -199,6 +203,5 @@ if st.button("Search"):
                     "results.xml",
                     "application/xml"
                 )
-
         else:
             st.warning("❌ No matches found.")
