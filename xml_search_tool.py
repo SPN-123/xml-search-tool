@@ -3,7 +3,7 @@ import pandas as pd
 import base64, gzip, io, json, re, zipfile
 from xml.dom import minidom
 
-st.title("🔍 Flexible XML Search Tool (ZIP Export)")
+st.title("🔍 Flexible XML Search Tool (ZIP Export with 4 Search Values)")
 
 uploaded_files = st.file_uploader(
     "Upload your XML or Encoded TXT files",
@@ -15,6 +15,7 @@ st.sidebar.header("Search Parameters")
 value1 = st.sidebar.text_input("Value 1 (e.g. 2025-09-01)", "")
 value2 = st.sidebar.text_input("Value 2 (optional)", "")
 value3 = st.sidebar.text_input("Value 3 (optional)", "")
+value4 = st.sidebar.text_input("Value 4 (optional)", "")
 
 payload_choice = st.sidebar.radio(
     "If JSON with XML inside:",
@@ -106,7 +107,7 @@ def extract_from_json(uploaded_file, payload):
 
 # ---------------------- MAIN SEARCH ----------------------
 if st.button("Search"):
-    search_terms = [v.lower() for v in [value1, value2, value3] if v.strip()]
+    search_terms = [v.lower() for v in [value1, value2, value3, value4] if v.strip()]
     if not uploaded_files:
         st.warning("Please upload at least one file.")
     elif not search_terms:
