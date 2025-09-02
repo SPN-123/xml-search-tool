@@ -1,9 +1,7 @@
 import streamlit as st
-import xml.etree.ElementTree as ET
 import pandas as pd
 import base64, gzip, io, json, re
 from xml.dom import minidom
-import copy
 
 st.title("🔍 Flexible XML Search Tool")
 
@@ -38,7 +36,7 @@ def safe_b64decode(data: str):
 
 
 def normalize_xml_text(text: str) -> str:
-    """Clean XML text for searching"""
+    """Clean XML/JSON text for searching"""
     return re.sub(r"\s+", " ", text).strip()
 
 
@@ -46,8 +44,6 @@ def normalize_xml_text(text: str) -> str:
 def decode_if_needed(uploaded_file):
     """Decode plain XML/JSON, or Base64+Gzip containing XML/JSON-with-XML"""
     raw_bytes = uploaded_file.read()
-
-    # Convert to text first
     text = raw_bytes.decode("utf-8-sig", errors="ignore").strip()
 
     # --- Remove wrapper lines like ### Start / End ###
@@ -58,9 +54,7 @@ def decode_if_needed(uploaded_file):
     try:
         if text.startswith("<?xml"):
             st.info(f"✅ {uploaded_file.name}: detected plain XML")
-            full_xml_data[uploaded_file.name] = [text]
-            preview_data[uploaded_file.name] = [text[:2000]]
-            return [io.StringIO(text)]
+            return [text]
         if text.startswith("{") or text.startswith("["):
             st.info(f"✅ {uploaded_file.name}: detected plain JSON")
             payload = json.loads(text)
@@ -75,9 +69,7 @@ def decode_if_needed(uploaded_file):
 
         if decompressed.startswith("<?xml"):
             st.info(f"✅ {uploaded_file.name}: decoded as XML (Base64+Gzip)")
-            full_xml_data[uploaded_file.name] = [decompressed]
-            preview_data[uploaded_file.name] = [decompressed[:2000]]
-            return [io.StringIO(decompressed)]
+            return [decompressed]
         if decompressed.startswith("{") or decompressed.startswith("["):
             st.info(f"✅ {uploaded_file.name}: decoded as JSON (Base64+Gzip)")
             payload = json.loads(decompressed)
@@ -92,7 +84,7 @@ def decode_if_needed(uploaded_file):
 
 def extract_from_json(uploaded_file, payload):
     """Helper to extract XML from JSON payloads"""
-    extracted, previews, fulls = [], [], []
+    extracted = []
     keys = []
     if payload_choice == "RqPayload":
         keys = ["RqPayload"]
@@ -106,34 +98,28 @@ def extract_from_json(uploaded_file, payload):
     for key in keys:
         if key in payload:
             xml_candidate = payload[key].replace('\\"', '"').replace("\\n", "\n").strip()
-            extracted.append(io.StringIO(xml_candidate))
-            previews.append(xml_candidate[:2000])
-            fulls.append(xml_candidate)
+            extracted.append(xml_candidate)
             st.text_area(f"Preview of {key} from {uploaded_file.name}", xml_candidate[:500], height=150)
 
-    if extracted:
-        full_xml_data[uploaded_file.name] = fulls
-        preview_data[uploaded_file.name] = previews
     return extracted
 
 
 # ---------------------- MAIN SEARCH ----------------------
 if st.button("Search"):
-    search_terms = [v for v in [value1, value2, value3] if v.strip()]
+    search_terms = [v.lower() for v in [value1, value2, value3] if v.strip()]
     if not uploaded_files:
         st.warning("Please upload at least one file.")
     elif not search_terms:
         st.warning("Please provide at least one search value.")
     else:
         for uploaded_file in uploaded_files:
-            file_objs = decode_if_needed(uploaded_file)
-            for idx, file_obj in enumerate(file_objs):
+            file_texts = decode_if_needed(uploaded_file)
+            for idx, xml_text in enumerate(file_texts):
                 try:
-                    xml_text = normalize_xml_text(file_obj.read())
-                    file_obj.seek(0)  # reset for parsing
+                    norm_text = normalize_xml_text(xml_text).lower()
 
-                    # Check if all search terms are present
-                    if all(term in xml_text for term in search_terms):
+                    # Check if all search terms are present (case-insensitive)
+                    if all(term in norm_text for term in search_terms):
                         results.append({
                             "File": f"{uploaded_file.name} (part {idx+1})",
                             "Matches": ", ".join(search_terms)
@@ -151,15 +137,25 @@ if st.button("Search"):
 
             # Export XML
             if xml_matches:
-                joined = "\n\n".join(xml_matches)
-                reparsed = minidom.parseString(joined)
-                pretty_xml = reparsed.toprettyxml(indent="  ")
+                wrapper = "<Results>\n" + "\n".join(xml_matches) + "\n</Results>"
 
-                st.download_button(
-                    "⬇️ Download Matching XML",
-                    pretty_xml.encode("utf-8"),
-                    "results.xml",
-                    "application/xml"
-                )
+                try:
+                    reparsed = minidom.parseString(wrapper)
+                    pretty_xml = reparsed.toprettyxml(indent="  ")
+
+                    st.download_button(
+                        "⬇️ Download Matching XML",
+                        pretty_xml.encode("utf-8"),
+                        "results.xml",
+                        "application/xml"
+                    )
+                except Exception as e:
+                    st.error(f"⚠️ Could not format XML for download: {e}")
+                    st.download_button(
+                        "⬇️ Download Raw Matches",
+                        wrapper.encode("utf-8"),
+                        "results_raw.xml",
+                        "application/xml"
+                    )
         else:
             st.warning("❌ No matches found.")
