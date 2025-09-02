@@ -42,9 +42,15 @@ def decode_if_needed(uploaded_file):
     """Decode plain XML/JSON, or Base64+Gzip containing XML/JSON-with-XML"""
     raw_bytes = uploaded_file.read()
 
+    # Convert to text first
+    text = raw_bytes.decode("utf-8-sig", errors="ignore").strip()
+
+    # --- Remove wrapper lines like ### Start / End ###
+    lines = [line for line in text.splitlines() if not line.strip().startswith("#")]
+    text = "".join(lines).strip()
+
     # --- Case 1: plain XML or JSON ---
     try:
-        text = raw_bytes.decode("utf-8-sig", errors="ignore").strip()
         if text.startswith("<?xml"):
             st.info(f"✅ {uploaded_file.name}: detected plain XML")
             full_xml_data[uploaded_file.name] = [text]
@@ -59,7 +65,6 @@ def decode_if_needed(uploaded_file):
 
     # --- Case 2: Try Base64+Gzip ---
     try:
-        text = raw_bytes.decode("utf-8-sig", errors="ignore").strip()
         decoded = safe_b64decode(text)
         decompressed = gzip.decompress(decoded).decode("utf-8-sig", errors="ignore").strip()
 
@@ -75,11 +80,7 @@ def decode_if_needed(uploaded_file):
 
     except Exception as e:
         st.error(f"⚠️ Could not decode {uploaded_file.name}: {e}")
-        try:
-            raw_text = raw_bytes.decode("utf-8-sig", errors="ignore")
-            st.text_area(f"Raw content from {uploaded_file.name}", raw_text[:500], height=150)
-        except:
-            st.error(f"⚠️ {uploaded_file.name}: unreadable")
+        st.text_area(f"Raw content from {uploaded_file.name}", text[:500], height=150)
 
     return []
 
