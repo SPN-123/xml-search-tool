@@ -1,7 +1,7 @@
 import streamlit as st
 import xml.etree.ElementTree as ET
 import pandas as pd
-import base64, gzip, re, io
+import base64, gzip, re, io, json
 
 st.title("🔍 XML Allotment Search Tool")
 
@@ -18,44 +18,95 @@ date_from = st.sidebar.text_input("Date From (e.g. 2026-07-06)", "")
 room_code = st.sidebar.text_input("RoomType Code (e.g. 216)", "")
 total_available = st.sidebar.text_input("TotalAvailable (e.g. 23)", "")
 
+# Extra option: when file contains JSON with embedded XML
+payload_choice = st.sidebar.radio(
+    "If JSON with XML inside:",
+    options=["Auto", "RqPayload", "RsPayload", "Both"],
+    index=0
+)
+
 results = []
+preview_data = {}   # store preview text
+full_xml_data = {}  # store full decoded XML
 
 
 def decode_if_needed(uploaded_file):
-    """Handle raw XML or Base64+Gzip encoded text files"""
+    """Handle raw XML, JSON-with-XML, or Base64+Gzip encoded text files"""
     raw_bytes = uploaded_file.read()
 
     try:
-        # Try plain XML
+        # Try plain XML first
         text = raw_bytes.decode("utf-8", errors="ignore").strip()
         if text.startswith("<?xml"):
-            return io.StringIO(text)
+            full_xml_data[uploaded_file.name] = [text]
+            preview_data[uploaded_file.name] = [text[:2000]]
+            return [io.StringIO(text)]
 
-        # Remove wrapper lines (### Start...End ###)
+        # Remove wrapper lines (### Start/End ###)
         cleaned = re.sub(r"^#+.*?Start.*?#+\s*", "", text, flags=re.DOTALL)
         cleaned = re.sub(r"#+.*?End.*?#+$", "", cleaned, flags=re.DOTALL).strip()
-
-        # Remove escape characters
         cleaned = cleaned.replace('\\"', '"').replace("\\n", "").replace("\\", "").strip()
 
         # Base64 decode + decompress
         decoded = base64.b64decode(cleaned)
-        decompressed = gzip.decompress(decoded).decode("utf-8", errors="ignore")
+        decompressed = gzip.decompress(decoded).decode("utf-8", errors="ignore").strip()
 
-        # Keep only valid XML (cut everything before first <?xml)
-        start = decompressed.find("<?xml")
-        if start != -1:
-            decompressed = decompressed[start:]
+        # ✅ Case 1: Direct XML inside
+        if decompressed.startswith("<?xml"):
+            full_xml_data[uploaded_file.name] = [decompressed]
+            preview_data[uploaded_file.name] = [decompressed[:2000]]
+            return [io.StringIO(decompressed)]
 
-        # Validate
-        if not decompressed.startswith("<?xml"):
-            raise ValueError("Decoded content is not valid XML")
+        # ✅ Case 2: JSON with embedded XML
+        if decompressed.startswith("{"):
+            payload = json.loads(decompressed)
+            extracted_xmls = []
+            previews = []
+            fulls = []
 
-        return io.StringIO(decompressed)
+            if payload_choice == "RqPayload":
+                xml_candidate = payload.get("RqPayload")
+                if xml_candidate:
+                    xml_candidate = xml_candidate.replace('\\"', '"').replace("\\n", "\n").strip()
+                    extracted_xmls.append(io.StringIO(xml_candidate))
+                    fulls.append(xml_candidate)
+                    previews.append(xml_candidate[:2000])
+
+            elif payload_choice == "RsPayload":
+                xml_candidate = payload.get("RsPayload")
+                if xml_candidate:
+                    xml_candidate = xml_candidate.replace('\\"', '"').replace("\\n", "\n").strip()
+                    extracted_xmls.append(io.StringIO(xml_candidate))
+                    fulls.append(xml_candidate)
+                    previews.append(xml_candidate[:2000])
+
+            elif payload_choice == "Both":
+                for key in ["RqPayload", "RsPayload"]:
+                    xml_candidate = payload.get(key)
+                    if xml_candidate:
+                        xml_candidate = xml_candidate.replace('\\"', '"').replace("\\n", "\n").strip()
+                        extracted_xmls.append(io.StringIO(xml_candidate))
+                        fulls.append(xml_candidate)
+                        previews.append(xml_candidate[:2000])
+
+            else:  # Auto
+                xml_candidate = payload.get("RqPayload") or payload.get("RsPayload")
+                if xml_candidate:
+                    xml_candidate = xml_candidate.replace('\\"', '"').replace("\\n", "\n").strip()
+                    extracted_xmls.append(io.StringIO(xml_candidate))
+                    fulls.append(xml_candidate)
+                    previews.append(xml_candidate[:2000])
+
+            if extracted_xmls:
+                full_xml_data[uploaded_file.name] = fulls
+                preview_data[uploaded_file.name] = previews
+                return extracted_xmls
+
+        raise ValueError("Decoded content is neither XML nor JSON-with-XML")
 
     except Exception as e:
         st.error(f"⚠️ Could not decode {uploaded_file.name}: {e}")
-        return None
+        return []
 
 
 def matches(allotment, date_from, room_code, total_available):
@@ -81,28 +132,43 @@ if st.button("Search"):
         st.warning("Please provide at least one search parameter.")
     else:
         for uploaded_file in uploaded_files:
-            file_obj = decode_if_needed(uploaded_file)
-            if not file_obj:
+            file_objs = decode_if_needed(uploaded_file)
+            if not file_objs:
                 continue
 
-            try:
-                tree = ET.parse(file_obj)
-                root = tree.getroot()
+            for idx, file_obj in enumerate(file_objs):
+                try:
+                    tree = ET.parse(file_obj)
+                    root = tree.getroot()
 
-                for allotment in root.findall(".//{*}Allotment"):
-                    if matches(allotment, date_from, room_code, total_available):
-                        date_elem = allotment.find(".//{*}Date")
-                        room_elem = allotment.find(".//{*}RoomType")
+                    for allotment in root.findall(".//{*}Allotment"):
+                        if matches(allotment, date_from, room_code, total_available):
+                            date_elem = allotment.find(".//{*}Date")
+                            room_elem = allotment.find(".//{*}RoomType")
 
-                        results.append({
-                            "File": uploaded_file.name,
-                            "RoomType": room_elem.attrib.get("Code") if room_elem is not None else "",
-                            "From": date_elem.attrib.get("From") if date_elem is not None else "",
-                            "To": date_elem.attrib.get("To") if date_elem is not None else "",
-                            "TotalAvailable": allotment.attrib.get("TotalAvailable")
-                        })
-            except Exception as e:
-                st.error(f"Error parsing {uploaded_file.name}: {e}")
+                            results.append({
+                                "File": f"{uploaded_file.name} (part {idx+1})",
+                                "RoomType": room_elem.attrib.get("Code") if room_elem is not None else "",
+                                "From": date_elem.attrib.get("From") if date_elem is not None else "",
+                                "To": date_elem.attrib.get("To") if date_elem is not None else "",
+                                "TotalAvailable": allotment.attrib.get("TotalAvailable")
+                            })
+                except Exception as e:
+                    st.error(f"Error parsing {uploaded_file.name}: {e}")
+
+        # Show previews and downloads
+        if preview_data:
+            st.subheader("📄 Preview of Decoded XML")
+            for fname, previews in preview_data.items():
+                for i, preview in enumerate(previews):
+                    st.text_area(f"Preview from {fname} (part {i+1})", preview, height=200)
+                    if fname in full_xml_data and i < len(full_xml_data[fname]):
+                        st.download_button(
+                            f"Download full XML from {fname} (part {i+1})",
+                            full_xml_data[fname][i].encode("utf-8"),
+                            file_name=f"{fname}_part{i+1}.xml",
+                            mime="application/xml"
+                        )
 
         if results:
             df = pd.DataFrame(results)
