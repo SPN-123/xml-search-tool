@@ -99,16 +99,36 @@ def decode_if_needed(uploaded_file):
 
 
 def matches(allotment, date_from, room_code, total_available):
+    """Flexible matching with strict comparisons (checks all Date elements)"""
     total = allotment.attrib.get("TotalAvailable")
-    date_elem = allotment.find(".//{*}Date")
-    room_elem = allotment.find(".//{*}RoomType")
 
-    if date_from and (not date_elem or date_from not in date_elem.attrib.get("From", "")):
-        return False
-    if room_code and (not room_elem or room_elem.attrib.get("Code") != room_code):
-        return False
-    if total_available and (total != total_available):
-        return False
+    # Room element
+    room_elem = allotment.find(".//{*}RoomType") or allotment.find(".//{*}room")
+
+    # --- Date check (must match at least one date) ---
+    if date_from:
+        found_match = False
+        for date_elem in allotment.findall(".//{*}Date") + allotment.findall(".//{*}date"):
+            date_attr = date_elem.attrib.get("From") or date_elem.attrib.get("value") or ""
+            if date_attr == date_from:   # exact match
+                found_match = True
+                break
+        if not found_match:
+            return False
+
+    # --- Room code check ---
+    if room_code:
+        room_attr = ""
+        if room_elem is not None:
+            room_attr = room_elem.attrib.get("Code") or room_elem.attrib.get("id") or ""
+        if room_attr != room_code:   # exact match
+            return False
+
+    # --- TotalAvailable check ---
+    if total_available:
+        if total != total_available:   # exact match
+            return False
+
     return True
 
 
@@ -124,16 +144,16 @@ if st.button("Search"):
                 try:
                     tree = ET.parse(file_obj)
                     root = tree.getroot()
-                    for allotment in root.findall(".//{*}Allotment"):
+                    for allotment in root.findall(".//{*}Allotment") + root.findall(".//{*}room"):
                         if matches(allotment, date_from, room_code, total_available):
-                            date_elem = allotment.find(".//{*}Date")
-                            room_elem = allotment.find(".//{*}RoomType")
+                            date_elem = allotment.find(".//{*}Date") or allotment.find(".//{*}date")
+                            room_elem = allotment.find(".//{*}RoomType") or allotment.find(".//{*}room")
                             results.append({
                                 "File": f"{uploaded_file.name} (part {idx+1})",
-                                "RoomType": room_elem.attrib.get("Code") if room_elem is not None else "",
-                                "From": date_elem.attrib.get("From") if date_elem is not None else "",
-                                "To": date_elem.attrib.get("To") if date_elem is not None else "",
-                                "TotalAvailable": allotment.attrib.get("TotalAvailable")
+                                "RoomType": room_elem.attrib.get("Code") if room_elem is not None else room_elem.attrib.get("id") if room_elem is not None else "",
+                                "From": date_elem.attrib.get("From") if date_elem is not None and "From" in date_elem.attrib else date_elem.attrib.get("value") if date_elem is not None else "",
+                                "To": date_elem.attrib.get("To") if date_elem is not None and "To" in date_elem.attrib else "",
+                                "TotalAvailable": allotment.attrib.get("TotalAvailable") if "TotalAvailable" in allotment.attrib else ""
                             })
                 except Exception as e:
                     st.error(f"Error parsing {uploaded_file.name} (part {idx+1}): {e}")
