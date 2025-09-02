@@ -1,9 +1,9 @@
 import streamlit as st
 import pandas as pd
-import base64, gzip, io, json, re
+import base64, gzip, io, json, re, zipfile
 from xml.dom import minidom
 
-st.title("🔍 Flexible XML Search Tool")
+st.title("🔍 Flexible XML Search Tool (ZIP Export)")
 
 uploaded_files = st.file_uploader(
     "Upload your XML or Encoded TXT files",
@@ -22,7 +22,7 @@ payload_choice = st.sidebar.radio(
     index=0
 )
 
-results, preview_data, full_xml_data, xml_matches = [], {}, {}, []
+results, fragment_files = [], []  # store fragments as (filename, xml_string)
 
 
 # ---------------------- HELPERS ----------------------
@@ -124,7 +124,10 @@ if st.button("Search"):
                             "File": f"{uploaded_file.name} (part {idx+1})",
                             "Matches": ", ".join(search_terms)
                         })
-                        xml_matches.append(xml_text)
+
+                        # Store this fragment for ZIP export
+                        fragment_name = f"{uploaded_file.name}_part{idx+1}.xml"
+                        fragment_files.append((fragment_name, xml_text))
 
                 except Exception as e:
                     st.error(f"Error parsing {uploaded_file.name} (part {idx+1}): {e}")
@@ -135,27 +138,26 @@ if st.button("Search"):
             st.success("✅ Matching records found!")
             st.dataframe(df)
 
-            # Export XML
-            if xml_matches:
-                wrapper = "<Results>\n" + "\n".join(xml_matches) + "\n</Results>"
+            if fragment_files:
+                # Create a ZIP in memory
+                zip_buffer = io.BytesIO()
+                with zipfile.ZipFile(zip_buffer, "w") as zipf:
+                    for fname, xml_str in fragment_files:
+                        # Pretty print each XML
+                        try:
+                            reparsed = minidom.parseString(xml_str)
+                            pretty_xml = reparsed.toprettyxml(indent="  ")
+                        except Exception:
+                            pretty_xml = xml_str
+                        zipf.writestr(fname, pretty_xml)
 
-                try:
-                    reparsed = minidom.parseString(wrapper)
-                    pretty_xml = reparsed.toprettyxml(indent="  ")
+                zip_buffer.seek(0)
 
-                    st.download_button(
-                        "⬇️ Download Matching XML",
-                        pretty_xml.encode("utf-8"),
-                        "results.xml",
-                        "application/xml"
-                    )
-                except Exception as e:
-                    st.error(f"⚠️ Could not format XML for download: {e}")
-                    st.download_button(
-                        "⬇️ Download Raw Matches",
-                        wrapper.encode("utf-8"),
-                        "results_raw.xml",
-                        "application/xml"
-                    )
+                st.download_button(
+                    "⬇️ Download All Matching XMLs (ZIP)",
+                    zip_buffer,
+                    "results.zip",
+                    "application/zip"
+                )
         else:
             st.warning("❌ No matches found.")
