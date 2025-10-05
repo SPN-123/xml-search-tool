@@ -4,7 +4,6 @@ import re
 import html
 import base64
 import gzip
-from io import BytesIO
 
 # ------------------------------------------------------------
 # PAGE CONFIG
@@ -14,8 +13,17 @@ st.title("🧩 XML Search Tool")
 
 st.markdown("""
 Search Wasabi XML files with **robust decode**, **deep unescape**, and **filters**.  
-Now includes **Base64 + GZIP decoding** and a **Download Matching XML** feature.
+Includes **Base64 + GZIP decoding** and **Download Matching XML**.  
+Results now **persist on the page** after downloads.
 """)
+
+# ------------------------------------------------------------
+# SESSION STATE (persist results across reruns)
+# ------------------------------------------------------------
+if "matches" not in st.session_state:
+    st.session_state.matches = []         # list[str] of keys
+if "last_query" not in st.session_state:
+    st.session_state.last_query = None    # tuple of inputs to know when to refresh
 
 # ------------------------------------------------------------
 # SIDEBAR
@@ -38,6 +46,10 @@ optional_filter2 = st.text_input("Optional filter 2 (content only)", "")
 optional_filter3 = st.text_input("Optional filter 3 (content only)", "")
 search_mode      = st.selectbox("Search mode", ["Literal text", "Regex pattern"])
 debug            = st.checkbox("Show debug info", value=False)
+
+col_btn = st.columns([1,1,6])
+do_search = col_btn[0].button("🔍 Start Search")
+clear_results = col_btn[1].button("🔄 New search (clear results)")
 
 # ------------------------------------------------------------
 # HELPERS
@@ -104,39 +116,44 @@ def optionals_pass(content_blocks: list[str], *filters: str) -> bool:
     return True
 
 def fetch_full_decoded_xml(s3, bucket, key):
-    """Fetch and return fully readable XML content from Wasabi (decoded if Base64+GZIP)."""
     obj = s3.get_object(Bucket=bucket, Key=key)
     raw = obj["Body"].read()
     base, extras = get_searchable_content(raw)
-    if extras:
-        return extras[0]
-    return base
+    return (extras[0] if extras else base).encode("utf-8")
+
+def build_client():
+    return boto3.client(
+        "s3",
+        endpoint_url="https://s3.wasabisys.com",   # stable global endpoint
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+    )
 
 # ------------------------------------------------------------
-# MAIN
+# CLEAR RESULTS (on demand only)
 # ------------------------------------------------------------
-if st.button("🔍 Start Search"):
+if clear_results:
+    st.session_state.matches = []
+    st.session_state.last_query = None
+
+# ------------------------------------------------------------
+# RUN SEARCH (only when pressed, and store in session)
+# ------------------------------------------------------------
+if do_search:
     if not all([access_key, secret_key, bucket_name, prefix, mandatory_term]):
         st.error("Please fill in all required fields.")
     else:
         st.info("Scanning files in Wasabi... please wait ⏳")
         try:
-            s3 = boto3.client(
-                "s3",
-                endpoint_url="https://s3.wasabisys.com",
-                aws_access_key_id=access_key,
-                aws_secret_access_key=secret_key,
-            )
-
+            s3 = build_client()
             resp = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
             files = resp.get("Contents", [])
-
             if not files:
                 st.warning("No files found under this prefix.")
+                st.session_state.matches = []
+                st.session_state.last_query = (prefix, mandatory_term, optional_filter1, optional_filter2, optional_filter3, search_mode)
             else:
-                results = []
-                total = len(files)
-
+                matches = []
                 for f in files:
                     key = f["Key"]
                     try:
@@ -144,36 +161,45 @@ if st.button("🔍 Start Search"):
                         base_text, extras = get_searchable_content(body)
                         blocks = [base_text] + extras
 
+                        if debug:
+                            st.text(f"🔎 {key}")
+
                         if mandatory_matches(key, blocks, mandatory_term, search_mode) and \
                            optionals_pass(blocks, optional_filter1, optional_filter2, optional_filter3):
-                            results.append(key)
+                            matches.append(key)
                             if debug:
-                                st.text(f"✅ Matched {key}")
+                                st.text("   ✅ matched")
                         elif debug:
-                            st.text(f"[skip] {key}")
-
+                            st.text("   ⛔ not matched")
                     except Exception as e:
                         st.warning(f"Error reading {key}: {e}")
 
-                if results:
-                    st.success(f"✅ Found {len(results)} matching XML(s).")
-
-                    for key in results:
-                        st.code(key)
-                        try:
-                            xml_text = fetch_full_decoded_xml(s3, bucket_name, key)
-                            xml_bytes = xml_text.encode("utf-8")
-                            st.download_button(
-                                label=f"⬇️ Download {key.split('/')[-1]}",
-                                data=xml_bytes,
-                                file_name=f"{key.split('/')[-1]}.xml",
-                                mime="application/xml"
-                            )
-                        except Exception as e:
-                            st.warning(f"Could not prepare download for {key}: {e}")
-
-                else:
-                    st.warning(f"No XML matched your search (scanned {total}).")
+                st.session_state.matches = matches
+                st.session_state.last_query = (prefix, mandatory_term, optional_filter1, optional_filter2, optional_filter3, search_mode)
 
         except Exception as e:
             st.error(f"Connection or listing error: {e}")
+
+# ------------------------------------------------------------
+# SHOW RESULTS FROM SESSION (persist after downloads)
+# ------------------------------------------------------------
+if st.session_state.matches:
+    st.success(f"✅ Found {len(st.session_state.matches)} matching XML(s).")
+    s3 = build_client()  # build here for download use
+
+    for key in st.session_state.matches:
+        st.code(key)
+        try:
+            xml_bytes = fetch_full_decoded_xml(s3, bucket_name, key)
+            # Use stable unique key for the download button so multiple buttons coexist
+            st.download_button(
+                label=f"⬇️ Download {key.split('/')[-1]}",
+                data=xml_bytes,
+                file_name=f"{key.split('/')[-1]}.xml",
+                mime="application/xml",
+                key=f"dl::{key}"  # unique key prevents Streamlit from confusing buttons
+            )
+        except Exception as e:
+            st.warning(f"Could not prepare download for {key}: {e}")
+else:
+    st.info("No results to show yet. Run a search to populate matches.")
