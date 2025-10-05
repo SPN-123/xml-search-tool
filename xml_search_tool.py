@@ -1,9 +1,9 @@
-# app.py — Wasabi Multi-Search (content-focused optional filters)
-# - Mandatory term can include path (toggle)
+# app.py — Wasabi Multi-Search (content-only optional filters) + Auto "Unescape & Pretty" XML
+# - Mandatory term can include PATH (toggle)
 # - Optional filters (up to 3) are applied to CONTENT ONLY and must ALL match the SAME body
-# - Content = extracted XML (preferred) else decoded/embedded text
-# - Decode pipeline: plain / gzip / base64 / base64+gzip + embedded base64 payloads
-# - Download selected or ALL matches (ZIP)
+# - Robust decode pipeline: plain / gzip / base64 / base64+gzip + embedded base64 payloads
+# - NEW: auto-unescape string-escaped XML (\", \\n, &amp; etc.) and pretty-print before preview/download
+# - Download selected match or ALL matches as a ZIP
 
 import sys, subprocess
 for pkg in ("boto3", "lxml", "streamlit"):
@@ -26,8 +26,8 @@ except Exception:
     LXML_AVAILABLE = False
 
 # ================= UI =================
-st.set_page_config(page_title="Wasabi Multi-Search — Content Filters", layout="wide")
-st.title("🔍 Wasabi Multi-Search — Content-Only Filters (Path optional for main term)")
+st.set_page_config(page_title="Wasabi Multi-Search — Content Filters + XML Unescape", layout="wide")
+st.title("🔍 Wasabi Multi-Search — Content Filters + Auto-Unescape & Pretty XML")
 
 c1, c2 = st.columns([1.2, 2])
 with c1:
@@ -143,7 +143,7 @@ def decode_candidates(raw: bytes):
         except: pass
     return tries
 
-# embedded base64 chunks (H4sIA... and long base64)
+# Find embedded base64 payloads (H4sIA... gzip or long base64)
 B64_CHUNK = re.compile(r"(H4sIA[A-Za-z0-9+/=]{40,}|[A-Za-z0-9+/]{80,}={0,2})")
 
 def embedded_payloads_from_text(txt: str):
@@ -163,19 +163,71 @@ def embedded_payloads_from_text(txt: str):
             except: pass
     return outs
 
+# ---- NEW: Unescape helpers ----
+def unescape_stringish(s: str) -> str:
+    """
+    Best-effort: turn a string-escaped payload into raw text/XML.
+    Handles: \", \\n, \\t, &amp; etc.
+    """
+    if s is None: return ""
+    t = s
+
+    # If it looks like a JSON-escaped string, try json.loads on it safely.
+    # We wrap it in quotes then escape any existing backslashes/quotes appropriately.
+    try:
+        wrapped = '"' + t.replace('\\', '\\\\').replace('"', '\\"') + '"'
+        t2 = json.loads(wrapped)
+        t = t2
+    except Exception:
+        # fallback manual unescapes
+        t = t.replace(r'\"', '"').replace(r"\\'", "'")
+        t = t.replace(r"\\n", "\n").replace(r"\\r", "\r").replace(r"\\t", "\t").replace("\\/", "/")
+        t = t.replace("\\\\", "\\")
+    # HTML entities
+    t = html.unescape(t)
+    # Trim surrounding quotes if any
+    if (t.startswith('"') and t.endswith('"')) or (t.startswith("'") and t.endswith("'")):
+        t = t[1:-1]
+    return t.strip()
+
 def extract_xmls_from_text(txt: str):
+    """
+    Pull XML from raw/escaped text. Also tries to unescape JSON-stringified XML.
+    """
     outs=[]
-    s=(txt or "").strip()
-    if s.startswith("<") or s.startswith("<?xml"):
-        outs.append(s)
+    s = (txt or "").strip()
+    # If it looks escaped (lots of \" or \n), try unescape first
+    if '\\"' in s or "\\n" in s or "&lt;" in s or "&gt;" in s:
+        s_un = unescape_stringish(s)
+        s_candidates = [s_un, s]
     else:
-        m = re.search(r"(<\?xml[\s\S]*?</[^>]+>|<[^>]+>[\s\S]*?</[^>]+>)", s)
-        if m: outs.append(m.group(0))
-    return outs
+        s_candidates = [s]
+
+    for cand in s_candidates:
+        c = cand.strip()
+        if c.startswith("<") or c.startswith("<?xml"):
+            outs.append(c)
+        else:
+            m = re.search(r"(<\?xml[\s\S]*?</[^>]+>|<[^>]+>[\s\S]*?</[^>]+>)", c)
+            if m: outs.append(m.group(0))
+
+    # unique
+    seen=set(); uniq=[]
+    for x in outs:
+        if x not in seen:
+            seen.add(x); uniq.append(x)
+    return uniq
 
 def pretty_xml(x: str) -> str:
-    try: return minidom.parseString(x).toprettyxml(indent="  ")
-    except: return x
+    try: 
+        return minidom.parseString(x).toprettyxml(indent="  ")
+    except Exception:
+        # try after unescape once more
+        try:
+            u = unescape_stringish(x)
+            return minidom.parseString(u).toprettyxml(indent="  ")
+        except Exception:
+            return x
 
 def compile_pat(term: str, regex: bool, whole_word: bool):
     if regex:
@@ -200,9 +252,7 @@ if run_btn:
         if use_xpath and not LXML_AVAILABLE:
             st.error("lxml is not available for XPath searches."); st.stop()
 
-        # Main term matcher (text/regex)
         main_pat = None if use_xpath else compile_pat(main_query, regex=(search_mode=="Regular expression"), whole_word=False)
-        # Optional filters (content only) — whole-word if selected
         opt_terms = [q.strip() for q in (opt_query1, opt_query2, opt_query3) if q.strip()]
         opt_pats = [] if use_xpath else [compile_pat(q, regex=(search_mode=="Regular expression"), whole_word=whole_word_optionals) for q in opt_terms]
 
@@ -216,68 +266,70 @@ if run_btn:
                 obj = s3.get_object(Bucket=bucket, Key=key)
                 raw = obj["Body"].read()
                 tries = decode_candidates(raw)
-                decoded = [t for _,t in tries]
+                decoded = [t for _, t in tries]
                 if debug: st.write(f"{key} → decode kinds: {[k for k,_ in tries]}")
 
-                embedded = []
+                # Unescape decoded payloads (if string-escaped)
+                decoded = [unescape_stringish(t) for t in decoded]
+
+                # Embedded payloads + unescape
+                embedded=[]
                 for t in decoded:
                     embedded.extend(embedded_payloads_from_text(t))
+                embedded = [unescape_stringish(t) for t in embedded]
 
+                # Extract XMLs from both decoded & embedded (with unescape attempts)
                 xmls=[]
                 for t in decoded + embedded:
                     xmls.extend(extract_xmls_from_text(t))
 
-                # Choose the PRIMARY CONTENT BODY for optional filters:
-                # prefer first XML; else first embedded; else first decoded
-                bodies = []
+                # Select primary content body for optional filters:
+                bodies=[]
                 if where_scope in ("All (Decoded + Embedded + XML)", "XML only"): bodies += xmls
                 if where_scope in ("All (Decoded + Embedded + XML)", "Decoded + Embedded only"):
                     bodies += embedded + decoded
-                primary = None
+                primary=None
                 for b in bodies:
                     if b and len(b.strip())>0:
-                        primary = b
-                        break
+                        primary=b; break
 
-                # 1) Check mandatory term:
-                main_ok = False
+                # 1) Mandatory term must match:
+                main_ok=False
                 if use_xpath:
-                    # XPath over XMLs only
                     for x in xmls:
                         try:
                             root = etree.fromstring(x.encode("utf-8"))
                             nsmap = {k if k else 'ns': v for k, v in (getattr(root,"nsmap",{}) or {}).items()}
                             if root.xpath(main_query, namespaces=nsmap):
-                                main_ok = True; break
+                                main_ok=True; break
                         except Exception:
                             continue
                 else:
-                    # Text/regex: in primary bodies and (optionally) path
-                    hay = []
+                    hay=[]
                     if primary: hay.append(primary)
                     if include_path_for_main: hay.append(key)
                     if any(main_pat.search(h) for h in hay if h is not None):
-                        main_ok = True
+                        main_ok=True
 
                 if not main_ok:
                     prog.progress(int((i+1)/len(keys)*100)); continue
 
-                # 2) Check optional filters — ALL must match the SAME primary body (content only)
-                opt_ok = True
+                # 2) Optional filters: ALL must match the SAME primary body (content only)
+                opt_ok=True
                 if opt_pats:
                     if not primary:
-                        opt_ok = False
+                        opt_ok=False
                     else:
                         for p in opt_pats:
                             if not p.search(primary):
-                                opt_ok = False; break
-
+                                opt_ok=False; break
                 if not opt_ok:
                     prog.progress(int((i+1)/len(keys)*100)); continue
 
-                # Build content to save (pretty XML if available, else primary)
+                # Final content: pretty XML if available; else primary (unescaped)
                 content = xmls[0] if xmls else (primary or "")
-                results.append({"Key": key, "Content": pretty_xml(content)})
+                content = pretty_xml(content)
+                results.append({"Key": key, "Content": content})
 
             except Exception as e:
                 if debug: st.write(f"{key}: {e}")
@@ -296,6 +348,7 @@ if run_btn:
         chosen = next(r for r in results if r["Key"] == sel)
         st.code((chosen["Content"] or "")[:4000], language="xml")
 
+        # Single download
         st.download_button(
             "⬇️ Download Selected XML",
             (chosen["Content"] or "").encode("utf-8"),
@@ -303,7 +356,7 @@ if run_btn:
             mime="text/xml",
         )
 
-        # ZIP all
+        # ALL as ZIP
         zip_buf = io.BytesIO()
         with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED) as z:
             for r in results:
