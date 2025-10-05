@@ -1,16 +1,14 @@
-# app.py — Wasabi File Viewer & Search (single-file, paste-into-Streamlit)
-# Works on Streamlit Cloud with NO extra files. Auto-installs boto3/lxml if missing.
+# app.py — Wasabi File Viewer + Prefix Browser + Search (single-file)
+# Paste this entire script into Streamlit Cloud (or local). No other files needed.
 
 import sys, subprocess
-
-# --- Auto-install minimal dependencies if missing (Streamlit is already available on Cloud) ---
+# Ensure deps (boto3 & lxml) are present on Cloud; Streamlit is already there.
 for pkg in ("boto3", "lxml"):
     try:
         __import__(pkg)
     except Exception:
         subprocess.check_call([sys.executable, "-m", "pip", "install", pkg])
 
-# --- Imports (after ensuring deps) ---
 import re, gzip, base64, html
 import streamlit as st
 import boto3
@@ -22,27 +20,36 @@ try:
 except Exception:
     LXML_AVAILABLE = False
 
-# ============================ UI ============================
-st.set_page_config(page_title="Wasabi File Viewer & Search", layout="wide")
-st.title("🔎 Wasabi File Viewer & Search — Single Script")
+# ================= UI =================
+st.set_page_config(page_title="Wasabi File Viewer + Browser + Search", layout="wide")
+st.title("🔎 Wasabi File Viewer + Browser + Search")
 
-st.markdown(
-    "Paste your **Wasabi S3 path** (e.g. `s3://my-bucket/folder/file.xml`), **or** fill **Bucket + File Path**.\n\n"
-    "Enter your **Wasabi Access Key** and **Secret Key**, then click **Fetch & Search**."
-)
+st.markdown("Fill **Bucket**, either a full **S3 path** (`s3://bucket/key`) or **Bucket + File Path**.\n"
+            "Use the **Prefix Browser** to list files if you’re unsure of the exact key.")
 
-with st.container():
-    s3_path = st.text_input("S3 Path (example: s3://rzgnprdws-code-90d/RZBPD/05102025/.../UpdateAri.txt)")
-    st.markdown("**— OR —**")
-    c1, c2 = st.columns(2)
-    with c1:
-        bucket = st.text_input("Bucket (e.g. rzgnprdws-code-90d)", "")
-    with c2:
-        file_path = st.text_input("File Path (relative under bucket)", "")
+cpath = st.text_input("Full S3 Path (optional, e.g. s3://rzgnprdws-code-90d/RZBPD/05102025/.../file.txt)", "")
+c1, c2 = st.columns(2)
+with c1:
+    bucket = st.text_input("Bucket (e.g. rzgnprdws-code-90d)", "")
+with c2:
+    file_path = st.text_input("File Path (key under bucket, e.g. RZBPD/05102025/.../file.txt)", "")
 
 ak = st.text_input("Wasabi Access Key", type="password")
 sk = st.text_input("Wasabi Secret Key", type="password")
 
+st.divider()
+# Prefix browser
+st.subheader("📁 Prefix Browser (list files in a folder)")
+bp1, bp2 = st.columns([2,1])
+with bp1:
+    prefix = st.text_input("Prefix (folder), e.g. RZBPD/05102025/Agoda/7140/611431_3541090/UpdateRestrictions/", "")
+with bp2:
+    list_btn = st.button("List under Prefix")
+
+sel_key = st.selectbox("Select a file from the prefix (if listed below)", options=[], index=None, placeholder="— nothing listed yet —")
+
+st.divider()
+# Search controls
 c3, c4, c5 = st.columns([1.2, 1.2, 1])
 with c3:
     search_mode = st.selectbox("Search Mode", ["Literal text", "Regular expression", "XPath (requires lxml)"])
@@ -51,20 +58,19 @@ with c4:
 with c5:
     debug = st.checkbox("Debug")
 
-colA, colB = st.columns(2)
-with colA:
+cA, cB = st.columns(2)
+with cA:
     test_btn = st.button("🧪 Test Connection")
-with colB:
+with cB:
     run_btn = st.button("🔍 Fetch & Search")
 
 st.divider()
 
-# ============================ Helpers ============================
+# ================= Helpers =================
 def endpoint_for(region: str) -> str:
     return "https://s3.wasabisys.com" if not region or region == "us-east-1" else f"https://s3.{region}.wasabisys.com"
 
 def discover_region(ak: str, sk: str, bucket: str) -> str:
-    """Use HeadBucket to learn the bucket's region (x-amz-bucket-region)."""
     s3g = boto3.client(
         "s3", aws_access_key_id=ak, aws_secret_access_key=sk,
         endpoint_url="https://s3.wasabisys.com",
@@ -78,31 +84,35 @@ def discover_region(ak: str, sk: str, bucket: str) -> str:
         return hdrs.get("x-amz-bucket-region", "us-east-1")
 
 def get_client(ak: str, sk: str, bucket: str):
-    """Build a region-correct Wasabi S3 client. Path-style for dotted buckets."""
     region = discover_region(ak, sk, bucket)
     endpoint = endpoint_for(region)
     addressing = "path" if "." in bucket else "virtual"
     s3 = boto3.client(
         "s3",
-        aws_access_key_id=ak,
-        aws_secret_access_key=sk,
-        endpoint_url=endpoint,
-        region_name=region,
+        aws_access_key_id=ak, aws_secret_access_key=sk,
+        endpoint_url=endpoint, region_name=region,
         config=Config(signature_version="s3v4", s3={"addressing_style": addressing})
     )
     return s3, region, endpoint, addressing
 
-def parse_input_path(s3_path: str, bucket: str, key: str):
-    """Return (bucket, key) from either s3://bucket/key or separate fields."""
+def parse_path(s3_path: str, bucket: str, key: str):
     s3_path = (s3_path or "").strip()
+    bucket = (bucket or "").strip()
+    key = (key or "").strip()
     if s3_path.startswith("s3://"):
         m = re.match(r"^s3://([^/]+)/(.+)$", s3_path)
-        if not m:
-            raise ValueError("Invalid S3 path. Expecting s3://bucket/key")
-        return m.group(1), m.group(2)
+        if not m: raise ValueError("Invalid S3 path. Expect s3://bucket/key")
+        return m.group(1).strip(), sanitize_key(m.group(2))
     if not bucket or not key:
-        raise ValueError("Provide either a full S3 Path, or both Bucket and File Path.")
-    return bucket.strip(), key.strip()
+        raise ValueError("Provide either a full S3 path OR both Bucket and File Path.")
+    return bucket, sanitize_key(key)
+
+def sanitize_key(key: str) -> str:
+    # remove leading slashes/spaces, collapse duplicate slashes, strip trailing spaces
+    key = key.replace("\\", "/").strip()
+    key = re.sub(r"^/+", "", key)
+    key = re.sub(r"/{2,}", "/", key)
+    return key
 
 def safe_b64decode(data: str) -> bytes:
     data = re.sub(r"[^A-Za-z0-9+/=]", "", data.strip().replace("\n", "").replace("\r", ""))
@@ -110,139 +120,174 @@ def safe_b64decode(data: str) -> bytes:
     if pad: data += "=" * (4 - pad)
     return base64.b64decode(data)
 
-def decode_to_text(raw: bytes, debug=False) -> str:
-    """Try plain → gzip → base64(+maybe gzip); prefer XML-looking if multiple succeed."""
-    attempts = []
-    # plain
+def decode_to_text(raw: bytes, dbg=False) -> str:
+    tries = []
     try:
         t = raw.decode("utf-8-sig", errors="ignore").strip()
-        if t: attempts.append(("plain", t))
+        if t: tries.append(("plain", t))
     except Exception: pass
-    # gzip
     try:
         t = gzip.decompress(raw).decode("utf-8-sig", errors="ignore").strip()
-        if t: attempts.append(("gzip", t))
+        if t: tries.append(("gzip", t))
     except Exception: pass
-    # base64 (+maybe gzip)
     try:
         s = raw.decode("utf-8", errors="ignore")
         b = safe_b64decode(s)
         if b[:2] == b"\x1f\x8b":
             try:
                 t = gzip.decompress(b).decode("utf-8-sig", errors="ignore").strip()
-                attempts.append(("b64+gzip", t))
+                if t: tries.append(("b64+gzip", t))
             except Exception: pass
         else:
             try:
                 t = b.decode("utf-8-sig", errors="ignore").strip()
-                attempts.append(("b64_text", t))
+                if t: tries.append(("b64_text", t))
             except Exception: pass
     except Exception: pass
-
-    if debug: st.write("Decode attempts:", [k for k, _ in attempts])
-    for _, t in attempts:
+    if dbg: st.write("Decode attempts:", [k for k,_ in tries])
+    for _,t in tries:
         if t.startswith("<?xml") or t.lstrip().startswith("<"):
             return t
-    if attempts: return attempts[0][1]
+    if tries: return tries[0][1]
     return raw.decode("utf-8", errors="ignore")
 
 def highlight_html(text: str, term: str, use_regex: bool) -> str:
-    if not term:
-        return f"<pre>{html.escape(text[:10000])}</pre>"
-    esc = html.escape(text)
-    matches = []
+    if not term: return f"<pre>{html.escape(text[:10000])}</pre>"
+    esc = html.escape(text); matches=[]
     if use_regex:
         try:
             matches = [(m.start(), m.end()) for m in re.finditer(term, esc, flags=re.IGNORECASE)]
         except re.error:
             return f"<pre>{esc[:10000]}</pre>"
     else:
-        low = esc.lower(); tl = term.lower(); i = 0
+        low, tl = esc.lower(), term.lower()
+        i = 0
         while True:
             i = low.find(tl, i)
             if i == -1: break
-            matches.append((i, i + len(tl)))
+            matches.append((i, i+len(tl)))
             i += len(tl)
-    if not matches:
-        return f"<pre>{esc[:10000]}</pre>"
+    if not matches: return f"<pre>{esc[:10000]}</pre>"
     out, p = [], 0
-    for s, e in matches:
+    for s,e in matches:
         out.append(esc[p:s]); out.append("<mark>"); out.append(esc[s:e]); out.append("</mark>")
         p = e
     out.append(esc[p:])
-    snippet = "".join(out)
-    if len(snippet) > 20000: snippet = snippet[:20000] + "..."
-    return f'<pre style="white-space:pre-wrap;word-break:break-word;">{snippet}</pre>'
+    snip = "".join(out)
+    if len(snip) > 20000: snip = snip[:20000] + "..."
+    return f'<pre style="white-space:pre-wrap;word-break:break-word;">{snip}</pre>'
 
-# ============================ Actions ============================
-def test_connection(ak, sk, resolved_bucket):
+def list_under_prefix(ak, sk, bucket, prefix, max_keys=500):
+    s3, *_ = get_client(ak, sk, bucket)
+    paginator = s3.get_paginator("list_objects_v2")
+    keys = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=sanitize_key(prefix or "")):
+        for obj in page.get("Contents", []):
+            keys.append(obj["Key"])
+            if len(keys) >= max_keys:
+                return keys
+    return keys
+
+def head_exists(ak, sk, bucket, key) -> bool:
+    s3, *_ = get_client(ak, sk, bucket)
     try:
-        s3, region, endpoint, addr = get_client(ak, sk, resolved_bucket)
-        s3.head_bucket(Bucket=resolved_bucket)
-        st.success(f"Connected ✓  region={region} | endpoint={endpoint} | addressing={addr}")
+        s3.head_object(Bucket=bucket, Key=key)
+        return True
     except ClientError as e:
-        err = e.response.get("Error", {})
-        st.error(f"HeadBucket failed: {err.get('Code')} — {err.get('Message')}")
+        if e.response.get("Error", {}).get("Code") in ("404", "NoSuchKey"):
+            return False
+        raise
+
+# ============== Actions ==============
+if test_btn:
+    try:
+        if cpath:
+            bkt, _ = parse_path(cpath, "", "")
+        else:
+            if not bucket: raise ValueError("Bucket required for test.")
+            bkt = bucket.strip()
+        s3, region, endpoint, addr = get_client(ak, sk, bkt)
+        s3.head_bucket(Bucket=bkt)
+        st.success(f"Connected ✓ region={region} | endpoint={endpoint} | addressing={addr}")
     except Exception as e:
         st.error(f"Test failed: {e}")
 
-def fetch_and_search(ak, sk, resolved_bucket, key, mode, term, debug):
-    st.info(f"Bucket: `{resolved_bucket}`  |  Key: `{key}`")
+# List prefix
+if list_btn:
     try:
-        s3, region, endpoint, addr = get_client(ak, sk, resolved_bucket)
-        if debug: st.info(f"Resolved → region={region} | endpoint={endpoint} | addressing={addr}")
-        obj = s3.get_object(Bucket=resolved_bucket, Key=key)
-        raw = obj["Body"].read()
-        text = decode_to_text(raw, debug=debug)
-        st.success(f"Fetched OK. Decoded length: {len(text)} chars.")
-        st.download_button("⬇️ Download decoded content", text, file_name="decoded.xml", mime="text/xml")
-
-        if mode == "XPath (requires lxml)":
-            if not LXML_AVAILABLE:
-                st.error("Install lxml failed/unavailable; XPath not supported in this session.")
-                return
-            if not text.strip().startswith("<"):
-                st.warning("File does not look like XML; XPath may fail.")
-                return
-            if not term.strip():
-                st.warning("Enter an XPath expression to search.")
-                return
-            try:
-                root = etree.fromstring(text.encode("utf-8"))
-                nsmap = {}
-                if hasattr(root, "nsmap") and isinstance(root.nsmap, dict):
-                    nsmap = {k if k else 'ns': v for k, v in root.nsmap.items()}
-                result = root.xpath(term, namespaces=nsmap)
-                st.info(f"XPath matched {len(result)} nodes (showing up to 10).")
-                for node in result[:10]:
-                    try:
-                        frag = etree.tostring(node, pretty_print=True, encoding=str)
-                    except Exception:
-                        frag = str(node)
-                    st.code(frag[:2000], language="xml")
-            except Exception as e:
-                st.error(f"XPath error: {e}")
+        if not (bucket and ak and sk):
+            st.error("Bucket, Access Key, Secret Key required to list."); 
         else:
-            use_regex = (mode == "Regular expression")
-            st.markdown(highlight_html(text, term, use_regex), unsafe_allow_html=True)
-
-    except ClientError as e:
-        err = e.response.get("Error", {})
-        st.error(f"S3 error: {err.get('Code')} — {err.get('Message')}")
+            p = sanitize_key(prefix)
+            st.info(f"Listing up to 500 keys under prefix: `{p}` …")
+            keys = list_under_prefix(ak, sk, bucket, p, max_keys=500)
+            if not keys:
+                st.warning("No objects under that prefix.")
+            else:
+                st.success(f"Found {len(keys)} objects.")
+                # Render a selectbox with keys; user can copy one into File Path
+                choice = st.selectbox("Keys found (copy one into 'File Path'):", keys, index=0)
+                st.code(choice)
+                st.info("Tip: copy the selected key and paste it into the 'File Path' field above, then click Fetch.")
     except Exception as e:
-        st.error(f"Failed: {e}")
+        st.error(f"List failed: {e}")
 
-# ============================ Buttons ============================
-if test_btn:
-    try:
-        bkt, key = parse_input_path(s3_path, bucket, file_path)
-        test_connection(ak, sk, bkt)
-    except Exception as e:
-        st.error(str(e))
+# User-picked selection (from the top selectbox) overwrites file_path if chosen there
+if sel_key:
+    file_path = sel_key
 
 if run_btn:
     try:
-        bkt, key = parse_input_path(s3_path, bucket, file_path)
-        fetch_and_search(ak, sk, bkt, key, search_mode, search_value, debug)
+        bkt, key = parse_path(cpath, bucket, file_path)
+        key = sanitize_key(key)
+        st.info(f"Bucket: `{bkt}` | Key: `{key}`")
+
+        # If key missing, suggest nearby matches under its parent prefix
+        if not head_exists(ak, sk, bkt, key):
+            parent = key.rsplit("/", 1)[0] + "/" if "/" in key else ""
+            st.error("NoSuchKey — that exact file was not found.")
+            st.info(f"Browsing parent prefix: `{parent}`")
+            nearby = list_under_prefix(ak, sk, bkt, parent, max_keys=200)
+            if nearby:
+                st.write("Here are nearby keys (copy the correct one into 'File Path'):")
+                st.code("\n".join(nearby[:50]))
+            st.stop()
+
+        s3, region, endpoint, addr = get_client(ak, sk, bkt)
+        if debug: st.info(f"Resolved → region={region} | endpoint={endpoint} | addressing={addr}")
+        obj = s3.get_object(Bucket=bkt, Key=key)
+        raw = obj["Body"].read()
+        text = decode_to_text(raw, dbg=debug)
+        st.success(f"Fetched OK. Decoded size: {len(text)} chars.")
+        st.download_button("⬇️ Download decoded content", text, file_name="decoded.xml", mime="text/xml")
+
+        if search_mode == "XPath (requires lxml)":
+            if not LXML_AVAILABLE:
+                st.error("lxml unavailable; install failed in this session. XPath not supported.")
+            elif not text.strip().startswith("<"):
+                st.warning("File is not XML; XPath won't work.")
+            elif not search_value.strip():
+                st.warning("Enter an XPath expression.")
+            else:
+                try:
+                    root = etree.fromstring(text.encode("utf-8"))
+                    nsmap = {}
+                    if hasattr(root, "nsmap") and isinstance(root.nsmap, dict):
+                        nsmap = {k if k else 'ns': v for k, v in root.nsmap.items()}
+                    result = root.xpath(search_value, namespaces=nsmap)
+                    st.info(f"XPath matched {len(result)} nodes (showing up to 10).")
+                    for node in result[:10]:
+                        try:
+                            frag = etree.tostring(node, pretty_print=True, encoding=str)
+                        except Exception:
+                            frag = str(node)
+                        st.code(frag[:2000], language="xml")
+                except Exception as e:
+                    st.error(f"XPath error: {e}")
+        else:
+            st.markdown(
+                highlight_html(text, search_value, use_regex=(search_mode == "Regular expression")),
+                unsafe_allow_html=True
+            )
     except Exception as e:
         st.error(str(e))
