@@ -9,8 +9,8 @@ from io import BytesIO
 # ------------------------------------------------------------
 # PAGE CONFIG
 # ------------------------------------------------------------
-st.set_page_config(page_title="Wasabi XML Finder", layout="wide")
-st.title("🕵️ Wasabi XML Finder — robust decode + deep unescape + filters")
+st.set_page_config(page_title="XML Search Tool", layout="wide")
+st.title("🧩 XML Search Tool")
 
 st.markdown("""
 Search Wasabi XML files with **robust decode**, **deep unescape**, and **filters**.  
@@ -109,7 +109,6 @@ def fetch_full_decoded_xml(s3, bucket, key):
     raw = obj["Body"].read()
     base, extras = get_searchable_content(raw)
     if extras:
-        # If we found GZIP decoded content, use the first one (main payload)
         return extras[0]
     return base
 
