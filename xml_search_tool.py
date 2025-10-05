@@ -1,34 +1,34 @@
 import streamlit as st
 import boto3
-import re
+import xml.etree.ElementTree as ET
 import html
+import re
 from io import BytesIO
 
-# ---------------------------------------------
-# PAGE CONFIG
-# ---------------------------------------------
+# -------------------------------
+# Title and Header
+# -------------------------------
 st.set_page_config(page_title="XML Search Tool", layout="wide")
 
-# ✅ UPDATED TITLE ONLY
-st.title("🧩 XML Search Tool")
+st.title("XML Search Tool")
 
 st.markdown("""
-Search Wasabi XML files easily with robust decode, deep unescape, and multiple filters.
+Use this tool to **search XML files** stored in your Wasabi bucket.
+Supports robust decoding, deep unescaping, and keyword filters.
 """)
 
-# ---------------------------------------------
-# SIDEBAR – WASABI CREDENTIALS
-# ---------------------------------------------
+# -------------------------------
+# S3 Configuration
+# -------------------------------
 st.sidebar.header("🔐 Wasabi Credentials")
-
 access_key = st.sidebar.text_input("Access Key", type="password")
 secret_key = st.sidebar.text_input("Secret Key", type="password")
 region = st.sidebar.text_input("Region", value="ap-south-1")
 bucket_name = st.sidebar.text_input("Bucket Name")
 
-# ---------------------------------------------
-# SEARCH FILTERS
-# ---------------------------------------------
+# -------------------------------
+# Prefix and Search Filters
+# -------------------------------
 st.subheader("📂 Prefix Scan & Search")
 
 prefix = st.text_input("Prefix to scan (folder, trailing '/' optional)", "")
@@ -39,11 +39,11 @@ optional_filter3 = st.text_input("Optional filter 3 (content only)", "")
 
 search_mode = st.selectbox("Search mode", ["Literal text", "Regex pattern"])
 
-# ---------------------------------------------
-# HELPER FUNCTIONS
-# ---------------------------------------------
+# -------------------------------
+# Helper Functions
+# -------------------------------
 def deep_unescape(text):
-    """Unescape multiple layers of HTML/XML encoding"""
+    """Unescape multiple levels of HTML/XML entities."""
     if not text:
         return text
     prev = None
@@ -52,72 +52,68 @@ def deep_unescape(text):
         text = html.unescape(text)
     return text
 
-def decode_content(raw_data):
-    """Safely decode binary content"""
+def decode_xml_content(content):
+    """Try to decode bytes as UTF-8 or fallback safely."""
     try:
-        return raw_data.decode("utf-8")
+        return content.decode("utf-8")
     except Exception:
         try:
-            return raw_data.decode("latin-1")
+            return content.decode("latin-1")
         except Exception:
-            return raw_data.decode(errors="ignore")
+            return content.decode(errors="ignore")
 
 def match_text(content, term, mode):
-    """Check match with literal or regex mode"""
+    """Check if content contains the search term."""
     if mode == "Literal text":
         return term in content
-    else:
-        try:
-            return re.search(term, content, flags=re.IGNORECASE) is not None
-        except re.error:
-            return False
+    elif mode == "Regex pattern":
+        return re.search(term, content) is not None
+    return False
 
-# ---------------------------------------------
-# MAIN SEARCH
-# ---------------------------------------------
+# -------------------------------
+# Search Execution
+# -------------------------------
 if st.button("🔍 Start Search"):
     if not all([access_key, secret_key, bucket_name, region, prefix, mandatory_term]):
-        st.error("Please fill in all required fields before searching.")
+        st.error("Please fill in all required fields.")
     else:
         st.info("Searching files... please wait ⏳")
 
-        try:
-            # ✅ CONNECT TO WASABI (no URL changed)
-            s3 = boto3.client(
-                "s3",
-                endpoint_url=f"https://s3.{region}.wasabisys.com",  # keep as original
-                aws_access_key_id=access_key,
-                aws_secret_access_key=secret_key,
-            )
+        # Connect to Wasabi (S3 compatible)
+        s3 = boto3.client(
+            "s3",
+            endpoint_url=f"https://s3.{region}.wasabisys.com",
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+        )
 
-            # List files
-            response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-            files = response.get("Contents", [])
+        # List all objects under prefix
+        response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+        files = response.get("Contents", [])
 
-            if not files:
-                st.warning("No files found under the given prefix.")
-            else:
-                results = []
-                for f in files:
-                    key = f["Key"]
-                    try:
-                        obj = s3.get_object(Bucket=bucket_name, Key=key)
-                        raw = obj["Body"].read()
-                        text = deep_unescape(decode_content(raw))
+        results = []
 
-                        if match_text(text, mandatory_term, search_mode):
-                            # Apply optional filters
-                            if all(filt in text or filt == "" for filt in [optional_filter1, optional_filter2, optional_filter3]):
-                                results.append(key)
-                    except Exception as e:
-                        st.warning(f"Error reading {key}: {e}")
+        for f in files:
+            key = f["Key"]
+            try:
+                obj = s3.get_object(Bucket=bucket_name, Key=key)
+                raw_data = obj["Body"].read()
+                content = deep_unescape(decode_xml_content(raw_data))
 
-                if results:
-                    st.success(f"✅ Found {len(results)} matching XMLs:")
-                    for r in results:
-                        st.code(r)
-                else:
-                    st.warning("No files matched your search criteria.")
+                # Match mandatory + optional filters
+                if match_text(content, mandatory_term, search_mode):
+                    filters = [optional_filter1, optional_filter2, optional_filter3]
+                    if all(filt in content or not filt for filt in filters):
+                        results.append(key)
+            except Exception as e:
+                st.warning(f"Error reading {key}: {e}")
 
-        except Exception as e:
-            st.error(f"Connection or listing error: {e}")
+        # -------------------------------
+        # Show Results
+        # -------------------------------
+        if results:
+            st.success(f"✅ Found {len(results)} matching files.")
+            for r in results:
+                st.code(r)
+        else:
+            st.warning("No files matched your criteria.")
