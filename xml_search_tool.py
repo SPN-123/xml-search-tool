@@ -6,13 +6,14 @@ import html
 # ---------------------------------------------
 # PAGE CONFIG
 # ---------------------------------------------
-st.set_page_config(page_title="XML Search Tool", layout="wide")
+st.set_page_config(page_title="Wasabi XML Finder", layout="wide")
 
-# ✅ ONLY CHANGE — Updated title
-st.title("🧩 XML Search Tool")
+# ✅ Original Title (no changes)
+st.title("🕵️ Wasabi XML Finder — robust decode + deep unescape + filters")
 
 st.markdown("""
-Search Wasabi XML files easily with robust decode, deep unescape, and multiple filters.
+Search Wasabi XML files with strong decoding and multi-layer unescaping.  
+Use filters to find matching XML files efficiently.
 """)
 
 # ---------------------------------------------
@@ -42,7 +43,7 @@ search_mode = st.selectbox("Search mode", ["Literal text", "Regex pattern"])
 # HELPER FUNCTIONS
 # ---------------------------------------------
 def deep_unescape(text):
-    """Unescape multiple layers of HTML/XML encoding"""
+    """Unescape multiple levels of HTML/XML encoding"""
     if not text:
         return text
     prev = None
@@ -52,7 +53,7 @@ def deep_unescape(text):
     return text
 
 def decode_content(raw_data):
-    """Safely decode binary content"""
+    """Safely decode XML bytes"""
     try:
         return raw_data.decode("utf-8")
     except Exception:
@@ -62,7 +63,7 @@ def decode_content(raw_data):
             return raw_data.decode(errors="ignore")
 
 def match_text(content, term, mode):
-    """Check match with literal or regex mode"""
+    """Check match using literal or regex mode"""
     if mode == "Literal text":
         return term in content
     else:
@@ -81,7 +82,7 @@ if st.button("🔍 Start Search"):
         st.info("Searching files... please wait ⏳")
 
         try:
-            # ✅ Original working endpoint logic
+            # ✅ Original endpoint logic (your working version)
             s3 = boto3.client(
                 "s3",
                 endpoint_url=f"https://s3.{region}.wasabisys.com",
@@ -89,7 +90,6 @@ if st.button("🔍 Start Search"):
                 aws_secret_access_key=secret_key,
             )
 
-            # List files under prefix
             response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
             files = response.get("Contents", [])
 
@@ -104,7 +104,7 @@ if st.button("🔍 Start Search"):
                         raw = obj["Body"].read()
                         text = deep_unescape(decode_content(raw))
 
-                        # Check mandatory term
+                        # Match mandatory term
                         if match_text(text, mandatory_term, search_mode):
                             # Check optional filters
                             if all(filt in text or filt == "" for filt in [optional_filter1, optional_filter2, optional_filter3]):
@@ -113,11 +113,11 @@ if st.button("🔍 Start Search"):
                         st.warning(f"Error reading {key}: {e}")
 
                 if results:
-                    st.success(f"✅ Found {len(results)} matching XMLs:")
+                    st.success(f"✅ Found {len(results)} matching XML files:")
                     for r in results:
                         st.code(r)
                 else:
-                    st.warning("No files matched your search criteria.")
+                    st.warning("No files matched your criteria.")
 
         except Exception as e:
             st.error(f"Connection or listing error: {e}")
