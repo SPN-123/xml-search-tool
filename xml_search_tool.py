@@ -3,12 +3,7 @@ import boto3
 import re
 import html
 
-# ---------------------------------------------
-# PAGE CONFIG
-# ---------------------------------------------
 st.set_page_config(page_title="Wasabi XML Finder", layout="wide")
-
-# ✅ Original Title (no changes)
 st.title("🕵️ Wasabi XML Finder — robust decode + deep unescape + filters")
 
 st.markdown("""
@@ -16,34 +11,21 @@ Search Wasabi XML files with strong decoding and multi-layer unescaping.
 Use filters to find matching XML files efficiently.
 """)
 
-# ---------------------------------------------
-# SIDEBAR – WASABI CREDENTIALS
-# ---------------------------------------------
 st.sidebar.header("🔐 Wasabi Credentials")
-
 access_key = st.sidebar.text_input("Access Key", type="password")
 secret_key = st.sidebar.text_input("Secret Key", type="password")
 region = st.sidebar.text_input("Region", value="ap-south-1")
 bucket_name = st.sidebar.text_input("Bucket Name")
 
-# ---------------------------------------------
-# SEARCH FILTERS
-# ---------------------------------------------
 st.subheader("📂 Prefix Scan & Search")
-
 prefix = st.text_input("Prefix to scan (folder, trailing '/' optional)", "")
 mandatory_term = st.text_input("🔹 Mandatory term (required)")
 optional_filter1 = st.text_input("Optional filter 1 (content only)", "")
 optional_filter2 = st.text_input("Optional filter 2 (content only)", "")
 optional_filter3 = st.text_input("Optional filter 3 (content only)", "")
-
 search_mode = st.selectbox("Search mode", ["Literal text", "Regex pattern"])
 
-# ---------------------------------------------
-# HELPER FUNCTIONS
-# ---------------------------------------------
 def deep_unescape(text):
-    """Unescape multiple levels of HTML/XML encoding"""
     if not text:
         return text
     prev = None
@@ -53,7 +35,6 @@ def deep_unescape(text):
     return text
 
 def decode_content(raw_data):
-    """Safely decode XML bytes"""
     try:
         return raw_data.decode("utf-8")
     except Exception:
@@ -63,7 +44,6 @@ def decode_content(raw_data):
             return raw_data.decode(errors="ignore")
 
 def match_text(content, term, mode):
-    """Check match using literal or regex mode"""
     if mode == "Literal text":
         return term in content
     else:
@@ -72,20 +52,16 @@ def match_text(content, term, mode):
         except re.error:
             return False
 
-# ---------------------------------------------
-# MAIN SEARCH
-# ---------------------------------------------
 if st.button("🔍 Start Search"):
     if not all([access_key, secret_key, bucket_name, region, prefix, mandatory_term]):
         st.error("Please fill in all required fields before searching.")
     else:
         st.info("Searching files... please wait ⏳")
-
         try:
-            # ✅ Original endpoint logic (your working version)
+            # 🔧 Only change: use global endpoint to avoid regional connectivity issues
             s3 = boto3.client(
                 "s3",
-                endpoint_url=f"https://s3.{region}.wasabisys.com",
+                endpoint_url="https://s3.wasabisys.com",
                 aws_access_key_id=access_key,
                 aws_secret_access_key=secret_key,
             )
@@ -104,9 +80,7 @@ if st.button("🔍 Start Search"):
                         raw = obj["Body"].read()
                         text = deep_unescape(decode_content(raw))
 
-                        # Match mandatory term
                         if match_text(text, mandatory_term, search_mode):
-                            # Check optional filters
                             if all(filt in text or filt == "" for filt in [optional_filter1, optional_filter2, optional_filter3]):
                                 results.append(key)
                     except Exception as e:
@@ -118,6 +92,5 @@ if st.button("🔍 Start Search"):
                         st.code(r)
                 else:
                     st.warning("No files matched your criteria.")
-
         except Exception as e:
             st.error(f"Connection or listing error: {e}")
