@@ -1,5 +1,5 @@
-# app.py — Wasabi XML Finder: Single File (Path) + Prefix Scan (Date) + Decode + Preview
-# Paste directly into Streamlit Cloud. Ensures boto3/lxml are available.
+# app.py — Wasabi XML Finder: Single File + Prefix Scan (Generic Search) + Decode + Preview
+# Paste into Streamlit Cloud. Ensures boto3/lxml are available at runtime.
 
 import sys, subprocess
 for pkg in ("boto3", "lxml"):
@@ -20,61 +20,59 @@ try:
 except Exception:
     LXML_AVAILABLE = False
 
-# ================= UI =================
-st.set_page_config(page_title="Wasabi XML Finder — Path & Prefix", layout="wide")
-st.title("🔎 Wasabi XML Finder — Path Fetch + Prefix Scan + Decode + Preview")
+# --------- UI ---------
+st.set_page_config(page_title="Wasabi XML Finder — Generic Search", layout="wide")
+st.title("🔎 Wasabi XML Finder — Generic Search Across XMLs")
 
 st.markdown(
-    "Use **File Path (exact key)** to fetch 1 file, **or** **Prefix to scan (folder)** to find all XMLs that "
-    "contain a **date** in the filename or inside the XML content."
+    "Use **File Path** to fetch/preview one file, or **Prefix Scan** to search **all XMLs** in a folder.\n"
+    "The tool auto-decodes plain / gzip / base64(+gzip) and extracts XML even if embedded in JSON."
 )
 
-c0a, c0b = st.columns([1.2, 2])
-with c0a:
+col_bucket, col_ak = st.columns([1.2, 2])
+with col_bucket:
     bucket = st.text_input("Bucket (e.g. rzgnprdws-code-90d)", "")
-with c0b:
+with col_ak:
     ak = st.text_input("Wasabi Access Key", type="password")
-
 sk = st.text_input("Wasabi Secret Key", type="password")
 
 st.markdown("### 📄 Single File Mode (exact path)")
 file_path = st.text_input("File Path (exact object key under bucket, e.g. RZBPD/05102025/.../UpdateAri.txt)", "")
 
-c1, c2, c3 = st.columns([1.1, 1.2, 1])
-with c1:
+s_c1, s_c2, s_c3 = st.columns([1.1, 1.2, 1])
+with s_c1:
     single_search_mode = st.selectbox("Preview search", ["None", "Literal text", "Regular expression", "XPath (requires lxml)"])
-with c2:
+with s_c2:
     single_search_value = st.text_input("Search term / Regex / XPath (for single file)", "")
-with c3:
+with s_c3:
     debug = st.checkbox("Debug")
 
 fetch_btn = st.button("📥 Fetch & Preview Single File")
 
 st.divider()
 
-st.markdown("### 📁 Prefix Scan Mode (find XMLs that contain a date)")
+st.markdown("### 📁 Prefix Scan Mode (search across all XMLs in a folder)")
 prefix = st.text_input("Prefix to scan (folder, ends with /)", "")
-c4, c5, c6 = st.columns([1.1, 1.1, 1.1])
-with c4:
-    date_str = st.text_input("Target date (e.g. 2025-10-05)", "")
-with c5:
-    date_mode = st.selectbox("Date match mode", ["Exact YYYY-MM-DD", "Smart variants (recommended)"])
-with c6:
+p_c1, p_c2, p_c3 = st.columns([1.3, 1.3, 1])
+with p_c1:
+    scan_search_mode = st.selectbox("Scan search mode", ["Literal text", "Regular expression", "XPath (requires lxml)"])
+with p_c2:
+    scan_query = st.text_input("Search text / Regex / XPath to match **inside** XML", "")
+with p_c3:
     max_keys = st.number_input("Max objects to scan", min_value=1, value=500, step=1)
 
-scan_btn = st.button("🚀 Scan Prefix & Find Matches")
+scan_btn = st.button("🚀 Scan Prefix & Return Only Matched XMLs")
 
 st.divider()
 
-# ================= Helpers =================
+# --------- Helpers ---------
 def endpoint_for(region: str) -> str:
     return "https://s3.wasabisys.com" if not region or region == "us-east-1" else f"https://s3.{region}.wasabisys.com"
 
 def discover_region(ak: str, sk: str, bucket: str) -> str:
-    s3g = boto3.client(
-        "s3", aws_access_key_id=ak, aws_secret_access_key=sk,
-        endpoint_url="https://s3.wasabisys.com", config=Config(signature_version="s3v4")
-    )
+    s3g = boto3.client("s3", aws_access_key_id=ak, aws_secret_access_key=sk,
+                       endpoint_url="https://s3.wasabisys.com",
+                       config=Config(signature_version="s3v4"))
     try:
         resp = s3g.head_bucket(Bucket=bucket)
         return resp["ResponseMetadata"]["HTTPHeaders"].get("x-amz-bucket-region", "us-east-1")
@@ -86,11 +84,10 @@ def get_client(ak: str, sk: str, bucket: str):
     region = discover_region(ak, sk, bucket)
     endpoint = endpoint_for(region)
     addressing = "path" if "." in bucket else "virtual"
-    s3 = boto3.client(
-        "s3", aws_access_key_id=ak, aws_secret_access_key=sk,
+    s3 = boto3.client("s3",
+        aws_access_key_id=ak, aws_secret_access_key=sk,
         endpoint_url=endpoint, region_name=region,
-        config=Config(signature_version="s3v4", s3={"addressing_style": addressing})
-    )
+        config=Config(signature_version="s3v4", s3={"addressing_style": addressing}))
     return s3, region, endpoint, addressing
 
 def sanitize_key(key: str) -> str:
@@ -141,7 +138,7 @@ def decode_candidates(raw: bytes):
 def extract_xmls_from_text(t: str) -> list[str]:
     outs = []
     s = t.strip()
-    # JSON payloads
+    # JSON payloads with embedded XML
     if (s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]")):
         try:
             payload = json.loads(s)
@@ -162,12 +159,11 @@ def extract_xmls_from_text(t: str) -> list[str]:
                     outs.append(cs)
         except Exception:
             pass
-    # relaxed XML-ish pattern
+    # relaxed XML-ish regex
     m = re.search(r"(<\?xml[\s\S]*?</[^>]+>|<[^>]+>[\s\S]*?</[^>]+>)", s)
-    if m:
-        outs.append(m.group(0))
-    if s.startswith("<") or s.startswith("<?xml"):
-        outs.append(s)
+    if m: outs.append(m.group(0))
+    # plain full XML
+    if s.startswith("<") or s.startswith("<?xml"): outs.append(s)
     # unique
     seen=set(); final=[]
     for x in outs:
@@ -184,74 +180,55 @@ def pretty_xml(xml_text: str) -> str:
 def list_keys(ak, sk, bucket, prefix, max_items=500):
     s3, *_ = get_client(ak, sk, bucket)
     paginator = s3.get_paginator("list_objects_v2")
-    keys = []
+    out = []
     for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
         for obj in page.get("Contents", []):
-            keys.append(obj["Key"])
-            if len(keys) >= max_items:
-                return keys
-    return keys
+            out.append(obj["Key"])
+            if len(out) >= max_items: return out
+    return out
 
-def build_date_regex(date_str: str, smart: bool) -> re.Pattern:
-    ds = date_str.strip()
-    if not smart:
-        return re.compile(re.escape(ds), re.IGNORECASE)
-    m = re.match(r"^\s*(\d{4})[-/](\d{1,2})[-/](\d{1,2})\s*$", ds)
-    if not m:
-        return re.compile(re.escape(ds), re.IGNORECASE)
-    Y, M, D = m.groups()
-    M2, D2 = M.zfill(2), D.zfill(2)
-    variants = {
-        f"{Y}-{M}-{D}", f"{Y}-{M2}-{D2}", f"{Y}/{M}/{D}", f"{Y}/{M2}/{D2}",
-        f"{D}-{M}-{Y}", f"{D2}-{M2}-{Y}", f"{D}/{M}/{Y}", f"{D2}/{M2}/{Y}",
-        f"{M}-{D}-{Y}", f"{M2}-{D2}-{Y}", f"{M}/{D}/{Y}", f"{M2}/{D2}/{Y}"
-    }
-    alts = "|".join(re.escape(v) for v in sorted(variants))
-    return re.compile(rf"(?:{alts})", re.IGNORECASE)
+def regex_from_literal(term: str) -> re.Pattern:
+    return re.compile(re.escape(term), re.IGNORECASE)
 
 def highlight_html_with_regex(text: str, term_re: re.Pattern) -> str:
     esc = html.escape(text)
-    matches = [(m.start(), m.end()) for m in term_re.finditer(esc)]
-    if not matches: return f"<pre>{esc[:10000]}</pre>"
-    out, p = [], 0
-    for s, e in matches:
-        out.append(esc[p:s]); out.append("<mark>"); out.append(esc[s:e]); out.append("</mark>")
+    spans = [(m.start(), m.end()) for m in term_re.finditer(esc)]
+    if not spans: return f"<pre>{esc[:10000]}</pre>"
+    parts, p = [], 0
+    for s, e in spans:
+        parts.append(esc[p:s]); parts.append("<mark>"); parts.append(esc[s:e]); parts.append("</mark>")
         p = e
-    out.append(esc[p:])
-    snip = "".join(out)
+    parts.append(esc[p:])
+    snip = "".join(parts)
     if len(snip) > 20000: snip = snip[:20000] + "..."
     return f'<pre style="white-space:pre-wrap;word-break:break-word;">{snip}</pre>'
 
-# ================= Single File Mode =================
+# --------- Single File Mode ---------
 if fetch_btn:
     try:
         if not (bucket and file_path and ak and sk):
             st.error("Bucket, File Path, Access, and Secret are required for single file mode.")
             st.stop()
         key = sanitize_key(file_path)
-        st.info(f"Fetching `{key}` from bucket `{bucket}` …")
+        st.info(f"Fetching `{key}` from `{bucket}` …")
         s3, region, endpoint, addr = get_client(ak, sk, bucket)
         if debug: st.info(f"Resolved → region={region} | endpoint={endpoint} | addressing={addr}")
         obj = s3.get_object(Bucket=bucket, Key=key)
         raw = obj["Body"].read()
 
-        # decode & extract
         texts = [t for _, t in decode_candidates(raw)]
         if not texts: texts = [raw.decode("utf-8", errors="ignore")]
         found_xmls = []
-        for t in texts:
-            found_xmls.extend(extract_xmls_from_text(t))
+        for t in texts: found_xmls.extend(extract_xmls_from_text(t))
         seen=set(); found_xmls=[x for x in found_xmls if not (x in seen or seen.add(x))]
 
         if not found_xmls:
-            st.error("No XML content found in this file after decoding.")
-            st.stop()
+            st.error("No XML content found in this file after decoding."); st.stop()
 
         pretty = pretty_xml(found_xmls[0])
         st.success("Decoded XML extracted.")
         st.download_button("⬇️ Download decoded XML", pretty, file_name="decoded.xml", mime="text/xml")
 
-        # preview with optional search
         if single_search_mode == "XPath (requires lxml)":
             if not LXML_AVAILABLE:
                 st.error("lxml not available for XPath.")
@@ -274,7 +251,7 @@ if fetch_btn:
             term = single_search_value.strip()
             if term:
                 try:
-                    term_re = re.compile(term, re.IGNORECASE) if single_search_mode == "Regular expression" else re.compile(re.escape(term), re.IGNORECASE)
+                    term_re = re.compile(term, re.IGNORECASE) if single_search_mode == "Regular expression" else regex_from_literal(term)
                     st.markdown(highlight_html_with_regex(pretty, term_re), unsafe_allow_html=True)
                 except re.error as e:
                     st.warning(f"Invalid regex: {e}")
@@ -289,102 +266,92 @@ if fetch_btn:
     except Exception as e:
         st.error(f"Failed: {e}")
 
-# ================= Prefix Scan Mode =================
+# --------- Prefix Scan Mode (generic search inside XMLs) ---------
 if scan_btn:
     try:
-        if not (bucket and prefix and ak and sk and date_str.strip()):
-            st.error("Bucket, Prefix, Access, Secret, and Date are required for prefix scan.")
+        if not (bucket and prefix and ak and sk and scan_query.strip()):
+            st.error("Bucket, Prefix, Access, Secret, and Search query are required for prefix scan.")
             st.stop()
 
         pf = sanitize_prefix(prefix)
-        date_re = build_date_regex(date_str, smart=(date_mode == "Smart variants (recommended)"))
-        st.info(f"Scanning up to {max_keys} object(s) under `{pf}` for date: **{date_str}**")
-
+        s3, region, endpoint, addr = get_client(ak, sk, bucket)
         keys = list_keys(ak, sk, bucket, pf, max_items=int(max_keys))
         if not keys:
-            st.warning("No objects found under that prefix.")
-            st.stop()
+            st.warning("No objects found under that prefix."); st.stop()
 
-        s3, region, endpoint, addr = get_client(ak, sk, bucket)
-        matches = []
+        st.info(f"Scanning {len(keys)} object(s) under `{pf}` for {scan_search_mode} match.")
+        term = scan_query.strip()
+
+        # Prepare matcher
+        use_xpath = (scan_search_mode == "XPath (requires lxml)")
+        if use_xpath and not LXML_AVAILABLE:
+            st.error("lxml not available for XPath search."); st.stop()
+        if not use_xpath:
+            if scan_search_mode == "Regular expression":
+                try:
+                    term_re = re.compile(term, re.IGNORECASE)
+                except re.error as e:
+                    st.error(f"Invalid regex: {e}"); st.stop()
+            else:
+                term_re = regex_from_literal(term)
+
+        matches = []  # [{key, xml, where}]
         prog = st.progress(0)
         for i, key in enumerate(keys):
-            where_hits = []
-            if date_re.search(key):  # match in path/filename
-                where_hits.append("path")
-
             try:
                 obj = s3.get_object(Bucket=bucket, Key=key)
                 raw = obj["Body"].read()
-                size = len(raw)
+
                 texts = [t for _, t in decode_candidates(raw)]
                 if not texts: texts = [raw.decode("utf-8", errors="ignore")]
                 found_xmls = []
-                for t in texts:
-                    found_xmls.extend(extract_xmls_from_text(t))
+                for t in texts: found_xmls.extend(extract_xmls_from_text(t))
+                # unique
                 seen=set(); found_xmls=[x for x in found_xmls if not (x in seen or seen.add(x))]
 
-                xml_hit = None
-                for xml in found_xmls:
-                    if date_re.search(xml):
-                        where_hits.append("content")
-                        xml_hit = xml
-                        break
+                hit_xml = None
+                if use_xpath:
+                    for xml in found_xmls:
+                        try:
+                            root = etree.fromstring(xml.encode("utf-8"))
+                            nsmap = {k if k else 'ns': v for k, v in (getattr(root, "nsmap", {}) or {}).items()}
+                            res = root.xpath(term, namespaces=nsmap)
+                            if res:
+                                hit_xml = xml; break
+                        except Exception:
+                            continue
+                else:
+                    for xml in found_xmls:
+                        if term_re.search(xml):
+                            hit_xml = xml; break
 
-                if where_hits:
-                    pretty = pretty_xml(xml_hit) if xml_hit else (found_xmls[0] if found_xmls else "")
-                    matches.append({"key": key, "where": ",".join(sorted(set(where_hits))), "size": size, "xml": pretty})
-            except Exception as e:
-                if debug: st.write(f"{key}: {e}")
-
-            prog.progress(int((i+1)/len(keys)*100))
+                if hit_xml:
+                    matches.append({"key": key, "xml": pretty_xml(hit_xml), "where": "content"})
+            except Exception:
+                pass
+            finally:
+                prog.progress(int((i+1)/len(keys)*100))
         prog.empty()
 
         if not matches:
-            st.error("❌ No XMLs matched that date in name or content.")
+            st.error("❌ No XMLs matched that query inside their content.")
             st.stop()
 
-        st.success(f"✅ Found {len(matches)} matching object(s).")
-        st.write([{"key": m["key"], "where": m["where"], "size": m["size"]} for m in matches])
+        st.success(f"✅ Found {len(matches)} matching XML file(s).")
+        st.write([{"key": m["key"]} for m in matches])
 
-        # choose a match to preview
         sel = st.selectbox("Preview which object?", [m["key"] for m in matches])
         chosen = next(m for m in matches if m["key"] == sel)
 
-        st.download_button("⬇️ Download matched XML", chosen["xml"] or "", file_name="matched.xml", mime="text/xml")
+        st.download_button("⬇️ Download matched XML", chosen["xml"], file_name="matched.xml", mime="text/xml")
 
-        # show preview & optional search
-        if chosen["xml"]:
-            st.subheader("Preview (date highlighted)")
-            st.markdown(highlight_html_with_regex(chosen["xml"], date_re), unsafe_allow_html=True)
-
-            # extra preview search
-            if single_search_mode == "XPath (requires lxml)":
-                if not LXML_AVAILABLE:
-                    st.error("lxml not available for XPath.")
-                elif not single_search_value.strip():
-                    pass
-                else:
-                    try:
-                        root = etree.fromstring(chosen["xml"].encode("utf-8"))
-                        nsmap = {k if k else 'ns': v for k, v in (getattr(root, "nsmap", {}) or {}).items()}
-                        nodes = root.xpath(single_search_value, namespaces=nsmap)
-                        st.info(f"XPath matched {len(nodes)} node(s). Showing up to 10.")
-                        for node in nodes[:10]:
-                            try: frag = etree.tostring(node, pretty_print=True, encoding=str)
-                            except Exception: frag = str(node)
-                            st.code(frag[:2000], language="xml")
-                    except Exception as e:
-                        st.error(f"XPath error: {e}")
-            elif single_search_mode in ("Literal text", "Regular expression") and single_search_value.strip():
-                try:
-                    term_re = re.compile(single_search_value, re.IGNORECASE) if single_search_mode == "Regular expression" else re.compile(re.escape(single_search_value), re.IGNORECASE)
-                    st.subheader("Extra preview highlighting")
-                    st.markdown(highlight_html_with_regex(chosen["xml"], term_re), unsafe_allow_html=True)
-                except re.error as e:
-                    st.warning(f"Invalid regex: {e}")
+        # Highlight for text/regex modes
+        if not use_xpath:
+            st.subheader("Preview (query highlighted)")
+            st.markdown(highlight_html_with_regex(chosen["xml"], term_re), unsafe_allow_html=True)
         else:
-            st.warning("Matched by path only; no XML body extracted.")
+            st.subheader("Preview")
+            st.code(chosen["xml"][:4000], language="xml")
 
     except ClientError as e:
         err = e.response.get("Error", {})
