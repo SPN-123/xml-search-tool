@@ -10,22 +10,21 @@ st.set_page_config(page_title="Wasabi XML Finder", layout="wide")
 st.title("🕵️ Wasabi XML Finder — robust decode + deep unescape + filters")
 
 st.markdown("""
-Search Wasabi XML files with **robust decode**, **deep unescape**, and **content-based filters**.
-This version matches deeply encoded or escaped text — ideal for dates or special chars.
+Search Wasabi XML files with **robust decode**, **deep unescape**, and **filters**.  
+Use debug mode to preview decoded content and confirm term visibility.
 """)
 
 # ------------------------------------------------------------
-# SIDEBAR – WASABI CREDENTIALS
+# SIDEBAR
 # ------------------------------------------------------------
 st.sidebar.header("🔐 Wasabi Credentials")
-
 access_key  = st.sidebar.text_input("Access Key", type="password")
 secret_key  = st.sidebar.text_input("Secret Key", type="password")
 region      = st.sidebar.text_input("Region", value="ap-south-1")
 bucket_name = st.sidebar.text_input("Bucket Name")
 
 # ------------------------------------------------------------
-# FILTERS
+# INPUTS
 # ------------------------------------------------------------
 st.subheader("📂 Prefix Scan & Search")
 
@@ -35,8 +34,7 @@ optional_filter1 = st.text_input("Optional filter 1 (content only)", "")
 optional_filter2 = st.text_input("Optional filter 2 (content only)", "")
 optional_filter3 = st.text_input("Optional filter 3 (content only)", "")
 search_mode      = st.selectbox("Search mode", ["Literal text", "Regex pattern"])
-
-debug = st.checkbox("Show debug info", value=False)
+debug            = st.checkbox("Show debug info", value=False)
 
 # ------------------------------------------------------------
 # HELPERS
@@ -81,7 +79,6 @@ if st.button("🔍 Start Search"):
         st.info("Scanning files in Wasabi... please wait ⏳")
 
         try:
-            # ✅ Global endpoint — stable for all regions
             s3 = boto3.client(
                 "s3",
                 endpoint_url="https://s3.wasabisys.com",
@@ -97,18 +94,18 @@ if st.button("🔍 Start Search"):
             else:
                 results = []
                 total = len(files)
-                checked = 0
 
                 for f in files:
                     key = f["Key"]
                     try:
                         obj = s3.get_object(Bucket=bucket_name, Key=key)
                         raw = obj["Body"].read()
-
-                        # Deep decode and unescape
                         text = deep_unescape(decode_xml_content(raw))
 
-                        checked += 1
+                        if debug:
+                            preview = text[:300].replace("\n", "\\n").replace("\r", "")
+                            st.markdown(f"**🔍 {key} — first 300 chars:**\n```\n{preview}\n```")
+
                         if match_text(text, mandatory_term, search_mode):
                             filters = [optional_filter1, optional_filter2, optional_filter3]
                             if all(flt.lower() in text.lower() or not flt for flt in filters):
@@ -116,17 +113,17 @@ if st.button("🔍 Start Search"):
                             elif debug:
                                 st.text(f"[skip] {key} — optional filter not matched")
                         elif debug:
-                            st.text(f"[skip] {key} — mandatory term not matched after unescape")
+                            st.text(f"[skip] {key} — mandatory term not matched")
 
                     except Exception as e:
                         st.warning(f"Error reading {key}: {e}")
 
                 if results:
-                    st.success(f"✅ Found {len(results)} matching XMLs (checked {checked} files).")
+                    st.success(f"✅ Found {len(results)} matching XMLs.")
                     for r in results:
                         st.code(r)
                 else:
-                    st.warning(f"No XML matched your search (checked {checked} files).")
+                    st.warning(f"No XML matched your search (scanned {total}).")
 
         except Exception as e:
             st.error(f"Connection or listing error: {e}")
