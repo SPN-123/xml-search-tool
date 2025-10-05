@@ -1,34 +1,34 @@
 import streamlit as st
 import boto3
-import xml.etree.ElementTree as ET
-import html
+import botocore
 import re
-from io import BytesIO
+import html
 
-# -------------------------------
-# Title and Header
-# -------------------------------
+# ---------------------------------------------
+# PAGE CONFIG
+# ---------------------------------------------
 st.set_page_config(page_title="XML Search Tool", layout="wide")
 
-st.title("XML Search Tool")
+# ✅ TITLE (only UI change you asked for)
+st.title("🧩 XML Search Tool")
 
 st.markdown("""
-Use this tool to **search XML files** stored in your Wasabi bucket.
-Supports robust decoding, deep unescaping, and keyword filters.
+Search Wasabi XML files with robust decode, deep unescape, and multiple filters.
 """)
 
-# -------------------------------
-# S3 Configuration
-# -------------------------------
+# ---------------------------------------------
+# SIDEBAR – WASABI CREDENTIALS
+# ---------------------------------------------
 st.sidebar.header("🔐 Wasabi Credentials")
+
 access_key = st.sidebar.text_input("Access Key", type="password")
 secret_key = st.sidebar.text_input("Secret Key", type="password")
 region = st.sidebar.text_input("Region", value="ap-south-1")
 bucket_name = st.sidebar.text_input("Bucket Name")
 
-# -------------------------------
-# Prefix and Search Filters
-# -------------------------------
+# ---------------------------------------------
+# SEARCH FILTERS
+# ---------------------------------------------
 st.subheader("📂 Prefix Scan & Search")
 
 prefix = st.text_input("Prefix to scan (folder, trailing '/' optional)", "")
@@ -39,11 +39,10 @@ optional_filter3 = st.text_input("Optional filter 3 (content only)", "")
 
 search_mode = st.selectbox("Search mode", ["Literal text", "Regex pattern"])
 
-# -------------------------------
-# Helper Functions
-# -------------------------------
-def deep_unescape(text):
-    """Unescape multiple levels of HTML/XML entities."""
+# ---------------------------------------------
+# HELPERS
+# ---------------------------------------------
+def deep_unescape(text: str) -> str:
     if not text:
         return text
     prev = None
@@ -52,68 +51,102 @@ def deep_unescape(text):
         text = html.unescape(text)
     return text
 
-def decode_xml_content(content):
-    """Try to decode bytes as UTF-8 or fallback safely."""
-    try:
-        return content.decode("utf-8")
-    except Exception:
+def decode_content(raw: bytes) -> str:
+    for enc in ("utf-8", "latin-1"):
         try:
-            return content.decode("latin-1")
+            return raw.decode(enc)
         except Exception:
-            return content.decode(errors="ignore")
+            pass
+    return raw.decode(errors="ignore")
 
-def match_text(content, term, mode):
-    """Check if content contains the search term."""
+def match_text(content: str, term: str, mode: str) -> bool:
     if mode == "Literal text":
         return term in content
-    elif mode == "Regex pattern":
-        return re.search(term, content) is not None
-    return False
+    try:
+        return re.search(term, content, flags=re.IGNORECASE | re.DOTALL) is not None
+    except re.error:
+        return False
 
-# -------------------------------
-# Search Execution
-# -------------------------------
+def make_s3_client(access_key, secret_key, region):
+    """
+    Build an s3 client. Try regional endpoint first,
+    then fall back to the global endpoint if the regional one is unreachable.
+    """
+    session = boto3.session.Session()
+    cfg = botocore.config.Config(retries={"max_attempts": 3, "mode": "standard"}, connect_timeout=5, read_timeout=60)
+
+    # 1) Regional endpoint (what you already had)
+    regional = f"https://s3.{region}.wasabisys.com"
+    try:
+        client = session.client(
+            "s3",
+            endpoint_url=regional,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            config=cfg,
+        )
+        # quick ping (cheap) to ensure endpoint is reachable
+        client.list_buckets()
+        return client
+    except Exception:
+        pass
+
+    # 2) Global endpoint (legacy setups often used this)
+    global_ep = "https://s3.wasabisys.com"
+    client = session.client(
+        "s3",
+        endpoint_url=global_ep,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        config=cfg,
+    )
+    return client
+
+# ---------------------------------------------
+# MAIN SEARCH
+# ---------------------------------------------
 if st.button("🔍 Start Search"):
     if not all([access_key, secret_key, bucket_name, region, prefix, mandatory_term]):
-        st.error("Please fill in all required fields.")
+        st.error("Please fill in all required fields before searching.")
     else:
         st.info("Searching files... please wait ⏳")
 
-        # Connect to Wasabi (S3 compatible)
-        s3 = boto3.client(
-            "s3",
-            endpoint_url=f"https://s3.{region}.wasabisys.com",
-            aws_access_key_id=access_key,
-            aws_secret_access_key=secret_key,
-        )
+        try:
+            # ✅ Build S3 client with regional→global fallback
+            s3 = make_s3_client(access_key, secret_key, region)
 
-        # List all objects under prefix
-        response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
-        files = response.get("Contents", [])
+            # List files (single page; your original behavior)
+            response = s3.list_objects_v2(Bucket=bucket_name, Prefix=prefix)
+            files = response.get("Contents", [])
 
-        results = []
+            if not files:
+                st.warning("No files found under the given prefix.")
+            else:
+                results = []
+                for f in files:
+                    key = f["Key"]
+                    try:
+                        obj = s3.get_object(Bucket=bucket_name, Key=key)
+                        raw = obj["Body"].read()
+                        text = deep_unescape(decode_content(raw))
 
-        for f in files:
-            key = f["Key"]
-            try:
-                obj = s3.get_object(Bucket=bucket_name, Key=key)
-                raw_data = obj["Body"].read()
-                content = deep_unescape(decode_xml_content(raw_data))
+                        if match_text(text, mandatory_term, search_mode):
+                            # Apply optional filters (non-empty must match)
+                            if all((flt in text) if flt else True for flt in [optional_filter1, optional_filter2, optional_filter3]):
+                                results.append(key)
+                    except Exception as e:
+                        st.warning(f"Error reading {key}: {e}")
 
-                # Match mandatory + optional filters
-                if match_text(content, mandatory_term, search_mode):
-                    filters = [optional_filter1, optional_filter2, optional_filter3]
-                    if all(filt in content or not filt for filt in filters):
-                        results.append(key)
-            except Exception as e:
-                st.warning(f"Error reading {key}: {e}")
+                if results:
+                    st.success(f"✅ Found {len(results)} matching XMLs:")
+                    for r in results:
+                        st.code(r)
+                else:
+                    st.warning("No files matched your search criteria.")
 
-        # -------------------------------
-        # Show Results
-        # -------------------------------
-        if results:
-            st.success(f"✅ Found {len(results)} matching files.")
-            for r in results:
-                st.code(r)
-        else:
-            st.warning("No files matched your criteria.")
+        except botocore.exceptions.EndpointConnectionError as e:
+            st.error("Could not reach the Wasabi endpoint. If your bucket is in a different region than entered, try the correct region or leave it as-is and the app will fall back automatically.")
+        except botocore.exceptions.ClientError as e:
+            st.error(f"AWS/Wasabi client error: {e}")
+        except Exception as e:
+            st.error(f"Unexpected error: {e}")
