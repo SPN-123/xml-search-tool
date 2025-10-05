@@ -17,8 +17,9 @@ st.caption("Search Wasabi XML files with robust decode, deep unescape, and filte
 st.sidebar.header("🔐 Wasabi Credentials")
 access_key = st.sidebar.text_input("Access Key", type="password")
 secret_key = st.sidebar.text_input("Secret Key", type="password")
-region     = st.sidebar.text_input("Region", value="ap-south-1")
+region     = st.sidebar.text_input("Region (e.g. ap-south-1)", value="ap-south-1")
 bucket     = st.sidebar.text_input("Bucket Name")
+custom_ep  = st.sidebar.text_input("Custom Endpoint (optional, e.g. https://s3.wasabisys.com)")
 
 # ----------------------------
 # Search inputs
@@ -55,7 +56,6 @@ def decode_content(raw: bytes) -> str:
     return raw.decode(errors="ignore")
 
 def list_all_objects_paginated(s3, bucket: str, prefix: str):
-    """Yield all objects under prefix (handles >1000 keys)."""
     kwargs = {"Bucket": bucket, "Prefix": prefix, "MaxKeys": 1000}
     while True:
         resp = s3.list_objects_v2(**kwargs)
@@ -69,42 +69,87 @@ def list_all_objects_paginated(s3, bucket: str, prefix: str):
 def content_matches(text: str, term: str, mode: str, case_sensitive: bool) -> bool:
     if not term:
         return False
-    if not case_sensitive:
-        text_cmp = text.lower()
-        term_cmp = term.lower()
-    else:
-        text_cmp = text
-        term_cmp = term
-
     if mode == "Literal text":
-        return term_cmp in text_cmp
+        return (term in text) if case_sensitive else (term.lower() in text.lower())
     try:
         flags = re.DOTALL if case_sensitive else (re.IGNORECASE | re.DOTALL)
         return re.search(term, text, flags=flags) is not None
     except re.error:
         return False
 
+def build_client(endpoint_url: str):
+    return boto3.client(
+        "s3",
+        endpoint_url=endpoint_url,
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        config=botocore.config.Config(retries={"max_attempts": 3, "mode": "standard"}, connect_timeout=5, read_timeout=60),
+    )
+
+def make_autodetected_client():
+    """
+    Try endpoints in this order:
+      1) custom endpoint (if provided)
+      2) regional endpoint from the 'Region' box
+      3) global endpoint
+    If the first/second respond with a different bucket region, rebuild a client for that region.
+    """
+    tried = []
+
+    # 1) custom endpoint
+    if custom_ep.strip():
+        tried.append(custom_ep.strip())
+
+    # 2) regional endpoint (what you typed)
+    tried.append(f"https://s3.{region}.wasabisys.com")
+
+    # 3) global endpoint
+    tried.append("https://s3.wasabisys.com")
+
+    last_error = None
+    for ep in tried:
+        try:
+            c = build_client(ep)
+            # head the bucket to both check connectivity and get the actual region if different
+            c.head_bucket(Bucket=bucket)
+            return c  # success on this endpoint
+        except botocore.exceptions.ClientError as e:
+            # If we get a region hint, use it
+            resp = getattr(e, "response", {}) or {}
+            hdrs = resp.get("ResponseMetadata", {}).get("HTTPHeaders", {})
+            bucket_region = hdrs.get("x-amz-bucket-region")
+            if bucket_region:
+                # rebuild client pointing to the hinted region
+                hinted_ep = f"https://s3.{bucket_region}.wasabisys.com"
+                try:
+                    c2 = build_client(hinted_ep)
+                    c2.head_bucket(Bucket=bucket)
+                    return c2
+                except Exception as inner:
+                    last_error = inner
+            else:
+                last_error = e
+        except botocore.exceptions.EndpointConnectionError as e:
+            last_error = e
+        except Exception as e:
+            last_error = e
+
+    raise last_error if last_error else RuntimeError("Unable to reach any Wasabi endpoint")
+
 # ----------------------------
 # Search
 # ----------------------------
 if st.button("🔍 Start Search"):
-    if not all([access_key, secret_key, bucket, region, prefix, mandatory]):
-        st.error("Please fill in Access Key, Secret Key, Region, Bucket, Prefix and Mandatory term.")
+    if not all([access_key, secret_key, bucket, prefix, mandatory]):
+        st.error("Please fill in Access Key, Secret Key, Bucket, Prefix and Mandatory term.")
     else:
         st.info("Searching files... please wait ⏳")
 
         try:
-            s3 = boto3.client(
-                "s3",
-                endpoint_url=f"https://s3.{region}.wasabisys.com",  # unchanged behavior
-                aws_access_key_id=access_key,
-                aws_secret_access_key=secret_key,
-            )
+            s3 = make_autodetected_client()
 
             total_scanned = 0
             results = []
-
-            # iterate all keys under prefix (with pagination)
             for obj in list_all_objects_paginated(s3, bucket, prefix):
                 key = obj["Key"]
                 total_scanned += 1
@@ -112,26 +157,16 @@ if st.button("🔍 Start Search"):
                     body = s3.get_object(Bucket=bucket, Key=key)["Body"].read()
                     text = deep_unescape(decode_content(body))
 
-                    # mandatory must match content
                     if not content_matches(text, mandatory, mode, case_sensitive):
                         continue
 
-                    # non-empty optional filters must also be present in content (literal, same case policy)
                     passed = True
                     for extra in (opt1, opt2, opt3):
-                        if extra:
-                            if case_sensitive:
-                                if extra not in text:
-                                    passed = False
-                                    break
-                            else:
-                                if extra.lower() not in text.lower():
-                                    passed = False
-                                    break
-
+                        if extra and (extra not in text if case_sensitive else extra.lower() not in text.lower()):
+                            passed = False
+                            break
                     if passed:
                         results.append(key)
-
                 except Exception as e:
                     st.warning(f"Error reading {key}: {e}")
 
@@ -145,7 +180,7 @@ if st.button("🔍 Start Search"):
                 st.warning("No files matched your search criteria.")
 
         except botocore.exceptions.EndpointConnectionError:
-            st.error("Could not reach the Wasabi endpoint. Please verify the Region and network access.")
+            st.error("Could not reach the Wasabi endpoint. Try setting the correct Region or enter the global endpoint in the 'Custom Endpoint' field (https://s3.wasabisys.com).")
         except botocore.exceptions.ClientError as e:
             st.error(f"Wasabi/AWS client error: {e}")
         except Exception as e:
